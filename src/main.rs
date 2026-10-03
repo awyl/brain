@@ -25,9 +25,12 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Response, Server};
 
 // Isolated from the host user's Claude settings, hooks and MCP servers; only the vault's own config applies.
-const DEFAULT_AGENT_CMD: &str = "claude -p --setting-sources project --strict-mcp-config \
-    --permission-mode acceptEdits --allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*) \
-    --output-format stream-json --verbose --include-partial-messages";
+// An argument list, not a string, because `Bash(brain lint:*)` contains a space.
+const DEFAULT_AGENT_CMD: &[&str] = &[
+    "claude", "-p", "--setting-sources", "project", "--strict-mcp-config", "--permission-mode", "acceptEdits",
+    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*)",
+    "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+];
 
 const TIDY_PROMPT: &str = "Run the Tidy workflow in AGENTS.md.";
 /// Follow-up context: how many recent turns the page may send, and how much of each is kept.
@@ -111,10 +114,9 @@ fn lint_cmd(vault: &Path) -> Result<()> {
     for i in &issues {
         println!("{i}");
     }
-    match issues.iter().filter(|i| !i.warn).count() {
-        0 => Ok(()),
-        n => Err(format!("{n} problem(s)").into()),
-    }
+    let errors = issues.iter().filter(|i| !i.warn).count();
+    println!("lint: {errors} problem(s), {} warning(s)", issues.len() - errors);
+    if errors > 0 { Err("lint failed".into()) } else { Ok(()) }
 }
 
 fn upgrade(vault: &Path) -> Result<()> {
@@ -462,6 +464,12 @@ fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> 
             reply += &format!("\n\n⚠ {} structure problem(s) left:\n{}", left.len(), left.join("\n"));
         }
     }
+    // Possible duplicates are only flagged, never auto-merged: the owner decides.
+    let dups = lint::Vault::load(vault).duplicates(Some(&changed_paths(vault, &before)?));
+    if !dups.is_empty() {
+        let list: Vec<String> = dups.iter().map(|i| format!("[[{}]] ↔ {}", i.path.trim_start_matches("notes/").trim_end_matches(".md"), i.msg.trim_start_matches("possible duplicate of "))).collect();
+        reply += &format!("\n\nPossibly the same thing (say \"merge them\" if so):\n{}", list.join("\n"));
+    }
 
     // Safety net: never leave agent edits uncommitted.
     git(vault, &["add", "-A"])?;
@@ -472,12 +480,17 @@ fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> 
     Ok(reply)
 }
 
-/// Lint errors (not warnings) in notes changed since `before`: committed, staged, unstaged or new.
-fn check_changed(vault: &Path, before: &str) -> Result<Vec<String>> {
+/// Files changed since `before`: committed, staged, unstaged or new.
+fn changed_paths(vault: &Path, before: &str) -> Result<Vec<String>> {
     let changed = git_out(vault, &["diff", "--name-only", before])?;
     let new = git_out(vault, &["ls-files", "--others", "--exclude-standard"])?;
+    Ok(changed.lines().chain(new.lines()).map(str::to_string).collect())
+}
+
+/// Lint errors (not warnings) in notes changed since `before`.
+fn check_changed(vault: &Path, before: &str) -> Result<Vec<String>> {
     let lint = lint::Vault::load(vault);
-    let paths: Vec<String> = changed.lines().chain(new.lines()).map(str::to_string).collect();
+    let paths = changed_paths(vault, before)?;
     // New or changed notes must be linked from somewhere; old orphans elsewhere don't block.
     let issues = paths.iter().flat_map(|p| lint.check(p)).chain(lint.orphans(&paths, false));
     Ok(issues.filter(|i| !i.warn).map(|i| i.to_string()).collect())
@@ -490,12 +503,18 @@ fn run_agent(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<St
         Ok(f) => f == "claude",
         Err(_) => custom.is_none(),
     };
-    let cmd = custom.unwrap_or_else(|| DEFAULT_AGENT_CMD.into());
-    let mut parts = cmd.split_whitespace();
-    let program = parts.next().ok_or("AGENT_CMD is empty")?;
+    let cmd: Vec<String> = match custom {
+        Some(c) => c.split_whitespace().map(str::to_string).collect(),
+        None => DEFAULT_AGENT_CMD.iter().map(|s| s.to_string()).collect(),
+    };
+    let (program, args) = cmd.split_first().ok_or("AGENT_CMD is empty")?;
 
+    // Put this binary on the agent's PATH so it can run `brain lint`.
+    let exe_dir = env::current_exe()?.parent().map(Path::to_path_buf).unwrap_or_default();
+    let path = env::join_paths(std::iter::once(exe_dir).chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())))?;
     let mut child = Command::new(program)
-        .args(parts)
+        .args(args)
+        .env("PATH", path)
         .current_dir(vault)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

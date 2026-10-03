@@ -1,6 +1,7 @@
 ---
 type: media
 tags: []
+aliases: []
 kind:  # book | film | show | music | podcast | game
 creator:
 status:  # want | doing | done | dropped

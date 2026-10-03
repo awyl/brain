@@ -1,6 +1,7 @@
 ---
 type: person
 tags: []
+aliases: []
 relation:
 birthday:
 updated:

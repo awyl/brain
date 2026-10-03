@@ -20,12 +20,17 @@ impl fmt::Display for Issue {
     }
 }
 
-/// Field name → allowed values (empty = anything).
-type Fields = Vec<(String, Vec<String>)>;
+struct Field {
+    name: String,
+    /// Allowed values (empty = anything).
+    allowed: Vec<String>,
+    /// `[]` in the template: the value must be a `[a, b]` list.
+    list: bool,
+}
 
 pub struct Vault<'a> {
     root: &'a Path,
-    types: HashMap<String, Fields>,
+    types: HashMap<String, Vec<Field>>,
     tags: HashSet<String>,
     /// Lowercased basenames of every note, for resolving [[links]] the way Obsidian does.
     names: HashSet<String>,
@@ -41,12 +46,12 @@ impl<'a> Vault<'a> {
                 .into_iter()
                 .filter_map(|line| {
                     let (k, v) = line.split_once(':')?;
-                    let (_, comment) = split_comment(v);
+                    let (value, comment) = split_comment(v);
                     let allowed = match comment {
                         Some(c) if c.contains('|') => c.split('|').map(|s| s.trim().to_string()).collect(),
                         _ => vec![],
                     };
-                    Some((k.trim().to_string(), allowed))
+                    Some(Field { name: k.trim().to_string(), allowed, list: value.starts_with('[') })
                 })
                 .collect();
             types.insert(stem(&rel), fields);
@@ -66,7 +71,59 @@ impl<'a> Vault<'a> {
         let mut issues: Vec<Issue> = notes.iter().chain(&md_files(self.root, "me")).flat_map(|p| self.check(p)).collect();
 
         issues.extend(self.orphans(&notes, true));
+        issues.extend(self.duplicates(None));
         issues
+    }
+
+    /// Warnings for same-type notes that look like the same thing: a shared name/alias/title, one name
+    /// inside the other (`ichiran` / `ichiran-namba`), or a near-typo. With `only`, just pairs touching those paths.
+    pub fn duplicates(&self, only: Option<&[String]>) -> Vec<Issue> {
+        struct Note {
+            rel: String,
+            kind: String,
+            tokens: Vec<String>,
+            keys: HashSet<String>,
+        }
+        let notes: Vec<Note> = md_files(self.root, "notes")
+            .into_iter()
+            .filter_map(|rel| {
+                let text = fs::read_to_string(self.root.join(&rel)).ok()?;
+                let fm: HashMap<&str, &str> = frontmatter(&text)?
+                    .into_iter()
+                    .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim(), split_comment(v).0)))
+                    .collect();
+                let tokens = name_tokens(&stem(&rel));
+                let mut keys: HashSet<String> = HashSet::from([tokens.concat()]);
+                keys.extend(fm.get("aliases").and_then(|v| list(v)).into_iter().flatten().map(|a| name_tokens(a).concat()));
+                if let Some(title) = text.lines().find_map(|l| l.strip_prefix("# ")) {
+                    keys.insert(name_tokens(title).concat());
+                }
+                keys.remove("");
+                Some(Note { kind: fm.get("type")?.to_string(), rel, tokens, keys })
+            })
+            .collect();
+
+        // One name inside the other, adding at most one word (`ichiran` / `ichiran-namba`, not `ramen` / `ramen-shops-in-tokyo`).
+        let subset = |a: &[String], b: &[String]| {
+            a.concat().len() >= 4 && b.len() <= a.len() + 1 && a.iter().all(|t| b.contains(t))
+        };
+        let mut out = vec![];
+        for (i, a) in notes.iter().enumerate() {
+            for b in &notes[i + 1..] {
+                if a.kind != b.kind || only.is_some_and(|o| !o.contains(&a.rel) && !o.contains(&b.rel)) {
+                    continue;
+                }
+                let (ka, kb) = (a.tokens.concat(), b.tokens.concat());
+                let similar = !a.keys.is_disjoint(&b.keys)
+                    || subset(&a.tokens, &b.tokens)
+                    || subset(&b.tokens, &a.tokens)
+                    || (ka.len().min(kb.len()) >= 6 && levenshtein(&ka, &kb) <= 2);
+                if similar {
+                    out.push(Issue { path: a.rel.clone(), msg: format!("possible duplicate of [[{}]]", stem(&b.rel)), warn: true });
+                }
+            }
+        }
+        out
     }
 
     /// Notes among `rels` that no note or hub links to. Only links from notes/ and me/ count
@@ -117,10 +174,10 @@ impl<'a> Vault<'a> {
 
         match fm.get("tags").map(String::as_str) {
             None => err("missing field 'tags'".into()),
-            Some(v) => match v.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+            Some(v) => match list(v) {
                 None => err(format!("tags must be a [a, b] list, got {v:?}")),
-                Some(list) => {
-                    for tag in list.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                Some(tags) => {
+                    for tag in tags {
                         if !self.tags.is_empty() && !self.tags.contains(tag) {
                             err(format!("unknown tag '{tag}': use one from _meta/tags.md, or add it there"));
                         }
@@ -146,9 +203,12 @@ impl<'a> Vault<'a> {
                         err(format!("unknown type '{t}' (one of: {})", known.join(", ")));
                     }
                     Some(fields) => {
-                        for (name, allowed) in fields {
+                        for Field { name, allowed, list: is_list } in fields {
                             match fm.get(name) {
                                 None => err(format!("missing field '{name}' (type {t}; leave empty if unknown)")),
+                                Some(v) if *is_list && list(v).is_none() => {
+                                    err(format!("{name} must be a [a, b] list, got {v:?}"))
+                                }
                                 Some(v) if !v.is_empty() && !allowed.is_empty() && !allowed.contains(v) => {
                                     err(format!("{name}: {v:?} is not one of {}", allowed.join(" | ")))
                                 }
@@ -186,6 +246,32 @@ fn split_comment(v: &str) -> (&str, Option<&str>) {
         Some(i) => (v[..i].trim(), Some(&v[i + 2..])),
         None => (v, None),
     }
+}
+
+/// `[a, b]` → Some(["a", "b"]); not a list → None.
+fn list(v: &str) -> Option<Vec<&str>> {
+    let inner = v.trim().strip_prefix('[')?.strip_suffix(']')?;
+    Some(inner.split(',').map(|s| s.trim().trim_matches(['"', '\'']).trim()).filter(|s| !s.is_empty()).collect())
+}
+
+/// "Ichiran Namba!" → ["ichiran", "namba"].
+fn name_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|t| !t.is_empty()).map(str::to_string).collect()
+}
+
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + (ca != *cb) as usize).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 /// Targets of [[target]], [[target|alias]], [[target#heading]].
@@ -295,6 +381,48 @@ mod tests {
         let orphans: Vec<_> = issues.iter().filter(|i| i.warn).map(|i| i.path.as_str()).collect();
         assert_eq!(orphans, ["notes/lonely.md"]);
         assert!(issues.iter().all(|i| i.warn), "{}", issues.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("\n"));
+    }
+
+    #[test]
+    fn duplicates() {
+        let topic = "---\ntype: topic\ntags: []\naliases: []\nupdated:\n---\n";
+        let note = |kind: &str, aliases: &str, title: &str| {
+            format!("---\ntype: {kind}\ntags: []\naliases: [{aliases}]\nupdated: 2026-10-03\n---\n# {title}\n")
+        };
+        let dir = vault(&[
+            ("_templates/topic.md", topic),
+            ("_templates/place.md", topic),
+            ("notes/ichiran.md", &note("place", "", "Ichiran")),
+            ("notes/ichiran-namba.md", &note("place", "", "Ichiran Namba")),
+            ("notes/ramen.md", &note("topic", "", "Ramen")),
+            ("notes/ichiran-ramen-guide.md", &note("topic", "", "Guide")), // two extra words: not a duplicate of ramen
+            ("notes/piranesi.md", &note("topic", "", "Piranesi")),
+            ("notes/piranesy.md", &note("topic", "", "Typo")),
+            ("notes/the-house.md", &note("topic", "Piranesi novel", "The House")),
+            ("notes/piranesi-novel.md", &note("topic", "", "Other")),
+            ("notes/cat.md", &note("topic", "", "Cat")),
+            ("notes/cat-food.md", &note("topic", "", "Cat food")), // "cat" too short to count as contained
+        ]);
+        let v = Vault::load(&dir.0);
+        let mut pairs: Vec<String> = v.duplicates(None).iter().map(|i| format!("{} {}", i.path, i.msg)).collect();
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            [
+                "notes/ichiran-namba.md possible duplicate of [[ichiran]]",
+                "notes/piranesi-novel.md possible duplicate of [[piranesi]]",
+                "notes/piranesi-novel.md possible duplicate of [[the-house]]",
+                "notes/piranesi.md possible duplicate of [[piranesy]]",
+            ]
+        );
+        assert_eq!(v.duplicates(Some(&["notes/piranesy.md".to_string()])).len(), 1);
+    }
+
+    #[test]
+    fn list_fields_must_be_lists() {
+        let tpl = "---\ntype: topic\ntags: []\naliases: []\nupdated:\n---\n";
+        let note = "---\ntype: topic\ntags: []\naliases: Ichiran\nupdated: 2026-10-03\n---\n";
+        assert_eq!(errors(&[("_templates/topic.md", tpl), ("notes/a.md", note)], "notes/a.md"), ["aliases must be a [a, b] list, got \"Ichiran\""]);
     }
 
     #[test]

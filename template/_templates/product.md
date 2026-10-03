@@ -1,6 +1,7 @@
 ---
 type: product
 tags: []
+aliases: []
 category:
 brand:
 status:  # want | own | had

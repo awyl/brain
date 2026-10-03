@@ -1,6 +1,7 @@
 ---
 type: recipe
 tags: []
+aliases: []
 cuisine:
 time:
 source:

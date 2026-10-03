@@ -79,8 +79,11 @@ inbox/  me/  notes/  _templates/  _meta/tags.md  _meta/rules.md
 - Tags must be listed in `_meta/tags.md`. Facts are dated bullets (`- 2026-10-03 · …`). `me/*.md` are hubs linking to notes.
 - The vault is its own schema: edit `_templates/` and `_meta/tags.md` to add types, fields or tags. Put your own agent rules in `_meta/rules.md`.
 
-`brain lint` checks every note against that schema: fields, allowed values, tags, `[[links]]`, filenames, and orphan notes (warnings). It exits 1 on errors.
-After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply.
+- `aliases: [..]` (Obsidian's own field) holds other names for the same thing, so the agent finds an existing note instead of creating a second one.
+
+`brain lint` checks every note against that schema: fields, allowed values, tags, `[[links]]`, filenames, plus warnings for orphan notes and possible duplicates (same type, plus a shared name/alias/title, one name inside the other, or a near-typo). It exits 1 on errors.
+The agent may run `brain lint` itself. Tidy and Restructure use it to find duplicates, and merge the clear ones (`merge X and Y` works in chat too).
+After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply. Possible duplicates are listed too, but never merged without asking.
 
 `brain upgrade` updates an existing vault from the binary's template. It overwrites `AGENTS.md`, `CLAUDE.md` and `.claude/commands/tidy.md`, adds missing files, and never touches anything else. Then send `restructure the vault` to convert old notes.
 

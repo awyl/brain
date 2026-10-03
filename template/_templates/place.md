@@ -1,6 +1,7 @@
 ---
 type: place
 tags: []
+aliases: []
 city:
 country:
 status:  # want | visited
