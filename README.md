@@ -14,6 +14,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 | `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`, `lint`, `upgrade`. |
 | `src/lint.rs` | Vault structure checks (no LLM). |
 | `src/search.rs` | Hybrid search: BM25 full-text + local embeddings. |
+| `src/fetch.rs` | `brain fetch`: web page → plain text, fenced as untrusted. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
 
@@ -52,7 +53,7 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
 | `HOST` / `PORT` | Bind address, default `127.0.0.1:8787`. |
 | `BRAIN_TOKEN` | Access token; default is generated into `$VAULT_DIR/.git/brain-token`. |
 | `BRAIN_PUSH` | Git remote to push the vault to after every change, e.g. `origin`. Failures are logged, never fatal. |
-| `TIDY_AT` | `HH:MM` local time to run the Tidy workflow daily (`serve`/`tunnel`). Skipped when the inbox is empty. |
+| `TIDY_AT` | `HH:MM` local time for the daily job (`serve`/`tunnel`): Tidy if the inbox has items, then Profile if notes changed since the last one. |
 | `AGENT_CMD` / `AGENT_FORMAT` | Agent CLI and how its output is read, see below. |
 | `TUNNEL_TOKEN` / `TUNNEL_HOSTNAME` | Named tunnel, see below. |
 
@@ -77,7 +78,7 @@ Requests run one at a time per vault, via a lock in `.git/brain.lock` that `serv
 inbox/  me/  notes/  _templates/  _meta/rules.md
 ```
 
-- Every note in `notes/` has a `type` (`place`, `media`, `product`, `person`, `recipe`, `topic`). Its frontmatter fields come from `_templates/<type>.md`; a `# a | b` comment there lists the allowed values.
+- Every note in `notes/` has a `type` (`place`, `media`, `product`, `person`, `recipe`, `entity`, `source`, `topic`). Its frontmatter fields come from `_templates/<type>.md`; a `# a | b` comment there lists the allowed values.
 - Tags are free-form, lowercase-kebab (`street-food`); `brain tags` lists them with counts. Facts are dated bullets (`- 2026-10-03 · …`). `me/*.md` are hubs linking to notes.
 - The vault is its own schema: edit `_templates/` to add types or fields. Put your own agent rules in `_meta/rules.md`.
 
@@ -88,6 +89,17 @@ The agent may run `brain lint` itself. Tidy and Restructure use it to find dupli
 After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply. Possible duplicates are listed too, but never merged without asking.
 
 `brain upgrade` updates an existing vault from the binary's template. It overwrites `AGENTS.md`, `CLAUDE.md` and `.claude/commands/tidy.md`, adds missing files, and never touches anything else. Then send `restructure the vault` to convert old notes.
+
+## The brain
+
+What makes it more than a notebook (see [VISION.md](VISION.md)):
+- **Profile:** `me/profile.md` is a generated synthesis of who you are (taste, habits, interests, dislikes, open questions). Every claim links its evidence. It's rebuilt by the daily job when notes changed, or on "update my profile". The agent reads it for "would I like…" questions.
+- **Entities:** creators, cities, cuisines and brands that appear in 2 or more notes get an `entity` page linking them. Lint warns about recurring names without one; Tidy creates them.
+- **Why:** when a capture has no reason or feeling, the agent asks one short follow-up and records the answer.
+- **Links:** shared URLs are fetched (`brain fetch`). An article becomes a `source` note with an LLM summary and your take; a reference page becomes a linked fact on the thing it's about.
+- **Provenance:** your facts are dated bullets in your words. Anything the LLM writes sits under a `(LLM)` heading or in a generated file.
+
+Fetched pages are untrusted input to an agent that can edit the vault. The output is fenced as data and `AGENTS.md` says to ignore instructions in it, but that's mitigation, not a guarantee. The agent can only edit the vault and run git, so the damage is limited to reversible commits.
 
 ## Search
 

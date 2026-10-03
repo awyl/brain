@@ -71,7 +71,39 @@ impl<'a> Vault<'a> {
         issues.extend(self.orphans(&notes, true));
         issues.extend(self.duplicates(None));
         issues.extend(self.similar_tags());
+        issues.extend(self.recurring_without_page());
         issues
+    }
+
+    /// Warnings for names used by 2+ notes in an entity-like field (creator, city…) that have no page of their own.
+    fn recurring_without_page(&self) -> Vec<Issue> {
+        const FIELDS: &[&str] = &["creator", "author", "city", "country", "brand", "cuisine"];
+        let mut known = HashSet::new();
+        let mut uses: HashMap<String, (String, usize)> = HashMap::new();
+        for rel in md_files(self.root, "notes") {
+            let text = fs::read_to_string(self.root.join(&rel)).unwrap_or_default();
+            let fm: HashMap<&str, &str> = frontmatter(&text)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim(), split_comment(v).0)))
+                .collect();
+            known.extend(names(&rel, &text, fm.get("aliases").copied()));
+            for value in FIELDS.iter().filter_map(|f| fm.get(f)).filter(|v| !v.is_empty()) {
+                let shown = value.trim_matches(['[', ']', '"']).to_string();
+                uses.entry(name_tokens(value).concat()).or_insert((shown, 0)).1 += 1;
+            }
+        }
+        let mut out: Vec<Issue> = uses
+            .into_iter()
+            .filter(|(key, (_, n))| *n >= 2 && !key.is_empty() && !known.contains(key))
+            .map(|(_, (name, n))| Issue {
+                path: "entities".into(),
+                msg: format!("recurring '{name}' ({n} notes) has no page"),
+                warn: true,
+            })
+            .collect();
+        out.sort_by(|a, b| a.msg.cmp(&b.msg));
+        out
     }
 
     /// Every tag in notes and hubs, with how many files use it, most used first.
@@ -122,6 +154,7 @@ impl<'a> Vault<'a> {
             kind: String,
             tokens: Vec<String>,
             keys: HashSet<String>,
+            links: HashSet<String>,
         }
         let notes: Vec<Note> = md_files(self.root, "notes")
             .into_iter()
@@ -132,13 +165,9 @@ impl<'a> Vault<'a> {
                     .filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim(), split_comment(v).0)))
                     .collect();
                 let tokens = name_tokens(&stem(&rel));
-                let mut keys: HashSet<String> = HashSet::from([tokens.concat()]);
-                keys.extend(fm.get("aliases").and_then(|v| list(v)).into_iter().flatten().map(|a| name_tokens(a).concat()));
-                if let Some(title) = text.lines().find_map(|l| l.strip_prefix("# ")) {
-                    keys.insert(name_tokens(title).concat());
-                }
-                keys.remove("");
-                Some(Note { kind: fm.get("type")?.to_string(), rel, tokens, keys })
+                let keys = names(&rel, &text, fm.get("aliases").copied());
+                let links = links(&text).into_iter().map(|l| l.to_lowercase()).collect();
+                Some(Note { kind: fm.get("type")?.to_string(), rel, tokens, keys, links })
             })
             .collect();
 
@@ -152,12 +181,18 @@ impl<'a> Vault<'a> {
                 if a.kind != b.kind || only.is_some_and(|o| !o.contains(&a.rel) && !o.contains(&b.rel)) {
                     continue;
                 }
+                // Notes that link each other are known to be distinct things (that's how a false alarm is dismissed).
+                if a.links.contains(&stem(&b.rel).to_lowercase()) || b.links.contains(&stem(&a.rel).to_lowercase()) {
+                    continue;
+                }
                 let (ka, kb) = (a.tokens.concat(), b.tokens.concat());
                 let named = !a.keys.is_disjoint(&b.keys)
                     || subset(&a.tokens, &b.tokens)
                     || subset(&b.tokens, &a.tokens)
                     || (ka.len().min(kb.len()) >= 6 && levenshtein(&ka, &kb) <= 2);
+                // Entity pages are mostly link lists, so their content looks alike; compare their names only.
                 let content = match (self.vectors.get(&a.rel), self.vectors.get(&b.rel)) {
+                    _ if a.kind == "entity" => false,
                     (Some(va), Some(vb)) => crate::search::cosine(va, vb) >= self.dup_threshold,
                     _ => false,
                 };
@@ -297,6 +332,17 @@ fn split_comment(v: &str) -> (&str, Option<&str>) {
 fn list(v: &str) -> Option<Vec<&str>> {
     let inner = v.trim().strip_prefix('[')?.strip_suffix(']')?;
     Some(inner.split(',').map(|s| s.trim().trim_matches(['"', '\'']).trim()).filter(|s| !s.is_empty()).collect())
+}
+
+/// Every name a note answers to, normalized: filename, `# Title`, aliases.
+fn names(rel: &str, text: &str, aliases: Option<&str>) -> HashSet<String> {
+    let mut keys = HashSet::from([name_tokens(&stem(rel)).concat()]);
+    keys.extend(aliases.and_then(list).into_iter().flatten().map(|a| name_tokens(a).concat()));
+    if let Some(title) = text.lines().find_map(|l| l.strip_prefix("# ")) {
+        keys.insert(name_tokens(title).concat());
+    }
+    keys.remove("");
+    keys
 }
 
 /// "Home Cooking" → "home-cooking".
@@ -477,6 +523,9 @@ mod tests {
             ]
         );
         assert_eq!(v.duplicates(Some(&["notes/piranesy.md".to_string()])).len(), 1);
+        // Linking dismisses the warning.
+        fs::write(dir.0.join("notes/piranesy.md"), note("topic", "", "Typo") + "Related: [[piranesi]]\n").unwrap();
+        assert!(Vault::load(&dir.0).duplicates(Some(&["notes/piranesy.md".to_string()])).is_empty());
     }
 
     #[test]
@@ -514,6 +563,21 @@ mod tests {
                 "similar tags: dish (1), dishes (1): pick one",
             ]
         );
+    }
+
+    #[test]
+    fn recurring_names_without_page() {
+        let book = |creator: &str| format!("---\ntype: media\ntags: []\naliases: []\ncreator: {creator}\nupdated: 2026-10-03\n---\n# Book\n");
+        let dir = vault(&[
+            ("notes/piranesi.md", &book("Susanna Clarke")),
+            ("notes/jonathan-strange.md", &book("Susanna Clarke")),
+            ("notes/kind-of-blue.md", &book("Miles Davis")),
+            ("notes/bitches-brew.md", &book("[[miles-davis]]")),
+            ("notes/miles-davis.md", "---\ntype: entity\ntags: []\naliases: [Miles]\nupdated: 2026-10-03\n---\n# Miles Davis\n"),
+            ("notes/hail-mary.md", &book("Andy Weir")),
+        ]);
+        let msgs: Vec<String> = Vault::load(&dir.0).recurring_without_page().into_iter().map(|i| i.msg).collect();
+        assert_eq!(msgs, ["recurring 'Susanna Clarke' (2 notes) has no page"]);
     }
 
     #[test]

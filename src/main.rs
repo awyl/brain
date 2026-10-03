@@ -7,6 +7,7 @@
 //!   brain ask <msg>    run the agent once (for cron), print the reply
 //!   brain search <q>   hybrid full-text + semantic search, top matches with snippets
 //!   brain tags         tags in use, with counts
+//!   brain fetch <url>  a web page as plain text (for the Link workflow)
 //!   brain lint         check vault structure against _templates/ (no LLM)
 //!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
@@ -15,6 +16,7 @@
 //! BRAIN_PUSH=<remote> pushes the vault after every change. TIDY_AT=HH:MM runs the Tidy workflow daily (serve/tunnel).
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
 
+mod fetch;
 mod lint;
 mod search;
 
@@ -31,11 +33,12 @@ use tiny_http::{Header, Method, Response, Server};
 // An argument list, not a string, because `Bash(brain lint:*)` contains a space.
 const DEFAULT_AGENT_CMD: &[&str] = &[
     "claude", "-p", "--setting-sources", "project", "--strict-mcp-config", "--permission-mode", "acceptEdits",
-    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*),Bash(brain tags:*)",
+    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*),Bash(brain tags:*),Bash(brain fetch:*)",
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 ];
 
 const TIDY_PROMPT: &str = "Run the Tidy workflow in AGENTS.md.";
+const PROFILE_PROMPT: &str = "Run the Profile workflow in AGENTS.md.";
 /// Follow-up context: how many recent turns the page may send, and how much of each is kept.
 const HISTORY_TURNS: usize = 6;
 const HISTORY_CHARS: usize = 1500;
@@ -54,6 +57,9 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("_templates/person.md", include_str!("../template/_templates/person.md")),
     ("_templates/recipe.md", include_str!("../template/_templates/recipe.md")),
     ("_templates/topic.md", include_str!("../template/_templates/topic.md")),
+    ("_templates/entity.md", include_str!("../template/_templates/entity.md")),
+    ("_templates/source.md", include_str!("../template/_templates/source.md")),
+    ("me/profile.md", include_str!("../template/me/profile.md")),
     ("_meta/rules.md", include_str!("../template/_meta/rules.md")),
     ("inbox/.gitkeep", ""),
     ("notes/.gitkeep", ""),
@@ -79,6 +85,7 @@ fn main() {
         ["tunnel"] => tunnel(),
         ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
         ["lint"] => lint_cmd(&vault_dir()),
+        ["fetch", url] => fetch::fetch(url).map(|t| println!("{t}")),
         ["tags"] => {
             for (tag, n) in lint::Vault::load(&vault_dir()).tag_counts() {
                 println!("{n:>4}  {tag}");
@@ -87,7 +94,7 @@ fn main() {
         }
         ["search", q] => search_cmd(&vault_dir(), q).map(|r| println!("{r}")),
         ["upgrade"] => upgrade(&vault_dir()),
-        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | tags | lint | upgrade".into()),
+        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | tags | fetch <url> | lint | upgrade".into()),
     };
     if let Err(e) = res {
         eprintln!("error: {e}");
@@ -232,8 +239,8 @@ fn bind(cfg: &Config) -> Result<Server> {
 fn run(server: Server, cfg: Config) {
     if let Some(at) = cfg.tidy_at {
         let vault = cfg.vault.clone();
-        println!("tidy scheduled daily at {at}");
-        thread::spawn(move || tidy_daily(&vault, at));
+        println!("tidy + profile scheduled daily at {at}");
+        thread::spawn(move || daily(&vault, at));
     }
     if search::semantic_enabled() {
         let vault = cfg.vault.clone();
@@ -255,7 +262,8 @@ fn run(server: Server, cfg: Config) {
     }
 }
 
-fn tidy_daily(vault: &Path, at: chrono::NaiveTime) {
+/// Daily at TIDY_AT: sort the inbox, then refresh the profile.
+fn daily(vault: &Path, at: chrono::NaiveTime) {
     loop {
         let now = chrono::Local::now().naive_local();
         let mut next = now.date().and_time(at);
@@ -263,20 +271,38 @@ fn tidy_daily(vault: &Path, at: chrono::NaiveTime) {
             next += chrono::Duration::days(1);
         }
         thread::sleep((next - now).to_std().unwrap_or_default());
-        // Skip the LLM call when there's nothing to sort.
+        // Each step skips the LLM call when there's nothing to do.
         let pending = fs::read_dir(vault.join("inbox"))
             .map(|d| d.flatten().filter(|e| e.file_name() != ".gitkeep").count())
             .unwrap_or(0);
         if pending == 0 {
             eprintln!("tidy: inbox empty, skipped");
-            continue;
+        } else {
+            eprintln!("tidy: {pending} inbox item(s)");
+            match ask(vault, TIDY_PROMPT, &mut |_| {}) {
+                Ok(reply) => eprintln!("tidy: done\n{reply}"),
+                Err(e) => eprintln!("tidy: error: {e}"),
+            }
         }
-        eprintln!("tidy: {pending} inbox item(s)");
-        match ask(vault, TIDY_PROMPT, &mut |_| {}) {
-            Ok(reply) => eprintln!("tidy: done\n{reply}"),
-            Err(e) => eprintln!("tidy: error: {e}"),
+        match profile_stale(vault) {
+            Ok(false) => eprintln!("profile: no note changes, skipped"),
+            Ok(true) => match ask(vault, PROFILE_PROMPT, &mut |_| {}) {
+                Ok(reply) => eprintln!("profile: done\n{reply}"),
+                Err(e) => eprintln!("profile: error: {e}"),
+            },
+            Err(e) => eprintln!("profile: error: {e}"),
         }
     }
+}
+
+/// Notes or hubs changed since me/profile.md was last written.
+fn profile_stale(vault: &Path) -> Result<bool> {
+    let last = git_out(vault, &["log", "-1", "--format=%H", "--", "me/profile.md"])?;
+    if last.is_empty() {
+        return Ok(true);
+    }
+    let changed = git_out(vault, &["diff", "--name-only", &last, "HEAD", "--", "notes", "me"])?;
+    Ok(changed.lines().any(|p| p != "me/profile.md"))
 }
 
 fn tunnel() -> Result<()> {

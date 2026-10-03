@@ -4,10 +4,10 @@ See [VISION.md](VISION.md) for the goal and principles these serve.
 
 ## Brain (toward "similar to me")
 
-- [ ] **1. Profile synthesis**: `me/profile.md`, regenerated on a schedule (e.g. weekly, like `TIDY_AT`) from all notes: taste patterns, likes and dislikes, habits. Every claim links its evidence (`[[fuglen-tokyo]]`), and the file is marked as generated, so it's never mistaken for raw facts. It goes into the agent's context for every question and answers "would I like X?".
-- [ ] **2. Recurring-entity pages**: during Tidy, an entity that appears in ≥2 notes (creator, city, cuisine, person) gets its own page (new types like `creator`/`city`, or `topic`) linking those notes. Below the threshold, it stays plain text. Lint could warn about recurring names without a page.
-- [ ] **3. Capture the why**: when a capture has no reason or feeling in it, the agent asks one short follow-up ("what did you like about it?") and records the answer as a dated fact. Never more than one question; skippable.
-- [ ] **4. Link ingestion**: `+ <url>` gets fetched during Tidy (agent web fetch, or `curl` in `brain`). The result is a short summary note marked as LLM-written, plus my reaction if I gave one, linked to related notes. No full-text copies.
+- [x] **1. Profile synthesis**: `me/profile.md`, regenerated on a schedule (e.g. weekly, like `TIDY_AT`) from all notes: taste patterns, likes and dislikes, habits. Every claim links its evidence (`[[fuglen-tokyo]]`), and the file is marked as generated, so it's never mistaken for raw facts. It goes into the agent's context for every question and answers "would I like X?".
+- [x] **2. Recurring-entity pages**: during Tidy, an entity that appears in ≥2 notes (creator, city, cuisine, person) gets its own page (new types like `creator`/`city`, or `topic`) linking those notes. Below the threshold, it stays plain text. Lint could warn about recurring names without a page.
+- [x] **3. Capture the why**: when a capture has no reason or feeling in it, the agent asks one short follow-up ("what did you like about it?") and records the answer as a dated fact. Never more than one question; skippable.
+- [x] **4. Link ingestion**: `+ <url>` gets fetched during Tidy (agent web fetch, or `curl` in `brain`). The result is a short summary note marked as LLM-written, plus my reaction if I gave one, linked to related notes. No full-text copies.
 
 ## Infra
 
