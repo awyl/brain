@@ -28,7 +28,17 @@ VAULT_DIR=~/brain brain tunnel                # same, plus a public https://*.tr
 Open that on the phone in Safari, then Share → Add to Home Screen. The page saves the token on the device and asks for it if it's missing.
 
 - `tunnel` uses `cloudflared` from `PATH`, or downloads the official release once to `~/.cache/brain/cloudflared` (Linux amd64/arm64). `cloudflared` is stopped when `brain` exits.
-- The quick tunnel URL is random and **changes on every restart**, so re-open the new URL after a restart.
+- The quick tunnel URL is random and **changes on every restart**, so re-open the new URL after a restart. For a stable URL, use a named tunnel.
+
+### Named tunnel (stable URL, needs a Cloudflare account + domain)
+
+1. Cloudflare dashboard → Zero Trust → Networks → Tunnels → Create tunnel (cloudflared). Copy the tunnel token.
+2. Add a public hostname, e.g. `brain.example.com` → service `http://localhost:8787` (match `PORT`).
+3. Run:
+   ```sh
+   TUNNEL_TOKEN=… TUNNEL_HOSTNAME=brain.example.com VAULT_DIR=~/brain brain tunnel
+   ```
+   `TUNNEL_TOKEN` switches `brain tunnel` to named mode. `TUNNEL_HOSTNAME` is only used to print the URL. Keep both in `.env`, which is gitignored.
 - The server needs `git` and the agent CLI on `PATH`.
 
 Optional nightly inbox tidy (crontab):

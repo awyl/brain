@@ -2,7 +2,8 @@
 //!
 //!   brain init <dir>   create a vault from the embedded template
 //!   brain serve        serve the PWA (env: VAULT_DIR, HOST=127.0.0.1, PORT=8787)
-//!   brain tunnel       serve + a public Cloudflare quick tunnel (downloads cloudflared if needed)
+//!   brain tunnel       serve + a public Cloudflare tunnel (downloads cloudflared if needed):
+//!                      named tunnel if TUNNEL_TOKEN is set (TUNNEL_HOSTNAME for the printed URL), else a quick tunnel
 //!   brain ask <msg>    run the agent once (for cron), print the reply
 //!
 //! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault.
@@ -151,8 +152,15 @@ fn tunnel() -> Result<()> {
     let server = bind(&cfg)?;
     thread::spawn(move || run(server, cfg));
 
+    // Named tunnel: cloudflared reads TUNNEL_TOKEN from the env itself (keeps it out of `ps`);
+    // its hostname → service route lives in the Cloudflare dashboard.
+    let named = env::var("TUNNEL_TOKEN").is_ok_and(|t| !t.is_empty());
     let mut cmd = Command::new(cloudflared()?);
-    cmd.args(["tunnel", "--no-autoupdate", "--url", &target]).stderr(Stdio::piped());
+    match named {
+        true => cmd.args(["tunnel", "--no-autoupdate", "run"]),
+        false => cmd.args(["tunnel", "--no-autoupdate", "--url", &target]),
+    };
+    cmd.stderr(Stdio::piped());
     // Kill cloudflared if brain dies, however it dies (SIGTERM, SIGKILL, crash).
     #[cfg(target_os = "linux")]
     unsafe {
@@ -164,9 +172,16 @@ fn tunnel() -> Result<()> {
     let mut child = cmd.spawn()?;
     // cloudflared logs to stderr; pick out the public URL, keep the rest for when it fails.
     let mut log = Vec::new();
+    let mut connected = false;
     for line in BufReader::new(child.stderr.take().unwrap()).lines() {
         let line = line?;
-        if let Some(url) = line.split_whitespace().find(|w| w.starts_with("https://") && w.ends_with(".trycloudflare.com")) {
+        if named && !connected && line.contains("Registered tunnel connection") {
+            connected = true;
+            match env::var("TUNNEL_HOSTNAME") {
+                Ok(host) => println!("public:  https://{host}/?token={token}"),
+                Err(_) => println!("tunnel connected; route your hostname to {target} in the Cloudflare dashboard"),
+            }
+        } else if let Some(url) = line.split_whitespace().find(|w| w.starts_with("https://") && w.ends_with(".trycloudflare.com")) {
             println!("public:  {url}/?token={token}");
         }
         log.push(line);
