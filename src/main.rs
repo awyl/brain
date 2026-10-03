@@ -6,7 +6,8 @@
 //!                      named tunnel if TUNNEL_TOKEN is set (TUNNEL_HOSTNAME for the printed URL), else a quick tunnel
 //!   brain ask <msg>    run the agent once (for cron), print the reply
 //!   brain search <q>   hybrid full-text + semantic search, top matches with snippets
-//!   brain lint         check vault structure against _templates/ and _meta/tags.md (no LLM)
+//!   brain tags         tags in use, with counts
+//!   brain lint         check vault structure against _templates/ (no LLM)
 //!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
 //! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault. Its stdout is streamed to
@@ -30,7 +31,7 @@ use tiny_http::{Header, Method, Response, Server};
 // An argument list, not a string, because `Bash(brain lint:*)` contains a space.
 const DEFAULT_AGENT_CMD: &[&str] = &[
     "claude", "-p", "--setting-sources", "project", "--strict-mcp-config", "--permission-mode", "acceptEdits",
-    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*)",
+    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*),Bash(brain tags:*)",
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 ];
 
@@ -53,7 +54,6 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("_templates/person.md", include_str!("../template/_templates/person.md")),
     ("_templates/recipe.md", include_str!("../template/_templates/recipe.md")),
     ("_templates/topic.md", include_str!("../template/_templates/topic.md")),
-    ("_meta/tags.md", include_str!("../template/_meta/tags.md")),
     ("_meta/rules.md", include_str!("../template/_meta/rules.md")),
     ("inbox/.gitkeep", ""),
     ("notes/.gitkeep", ""),
@@ -79,9 +79,15 @@ fn main() {
         ["tunnel"] => tunnel(),
         ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
         ["lint"] => lint_cmd(&vault_dir()),
+        ["tags"] => {
+            for (tag, n) in lint::Vault::load(&vault_dir()).tag_counts() {
+                println!("{n:>4}  {tag}");
+            }
+            Ok(())
+        }
         ["search", q] => search_cmd(&vault_dir(), q).map(|r| println!("{r}")),
         ["upgrade"] => upgrade(&vault_dir()),
-        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | lint | upgrade".into()),
+        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | tags | lint | upgrade".into()),
     };
     if let Err(e) = res {
         eprintln!("error: {e}");

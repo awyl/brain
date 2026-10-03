@@ -1,6 +1,6 @@
 //! Structural checks on a vault, no LLM. The schema lives in the vault itself:
-//! `_templates/<type>.md` frontmatter lists each type's fields (a `# a | b` comment lists allowed values),
-//! `_meta/tags.md` lists allowed tags.
+//! `_templates/<type>.md` frontmatter lists each type's fields (a `# a | b` comment lists allowed values).
+//! Tags are free-form but must be lowercase-kebab; near-duplicate tags across the vault are warned about.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -31,7 +31,6 @@ struct Field {
 pub struct Vault<'a> {
     root: &'a Path,
     types: HashMap<String, Vec<Field>>,
-    tags: HashSet<String>,
     /// Lowercased basenames of every note, for resolving [[links]] the way Obsidian does.
     names: HashSet<String>,
     /// Up-to-date embeddings from the search index (empty if there's none): content-level duplicates.
@@ -59,14 +58,9 @@ impl<'a> Vault<'a> {
                 .collect();
             types.insert(stem(&rel), fields);
         }
-        let tags = fs::read_to_string(root.join("_meta/tags.md"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(str::to_string))
-            .collect();
         let names = md_files(root, "").iter().map(|p| stem(p).to_lowercase()).collect();
         let vectors = if crate::search::semantic_enabled() { crate::search::fresh_vectors(root) } else { HashMap::new() };
-        Vault { root, types, tags, names, vectors, dup_threshold: crate::search::dup_threshold() }
+        Vault { root, types, names, vectors, dup_threshold: crate::search::dup_threshold() }
     }
 
     /// Every note in notes/ and me/, plus orphan warnings.
@@ -76,7 +70,47 @@ impl<'a> Vault<'a> {
 
         issues.extend(self.orphans(&notes, true));
         issues.extend(self.duplicates(None));
+        issues.extend(self.similar_tags());
         issues
+    }
+
+    /// Every tag in notes and hubs, with how many files use it, most used first.
+    pub fn tag_counts(&self) -> Vec<(String, usize)> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for rel in md_files(self.root, "notes").iter().chain(&md_files(self.root, "me")) {
+            let text = fs::read_to_string(self.root.join(rel)).unwrap_or_default();
+            let tags = frontmatter(&text)
+                .unwrap_or_default()
+                .into_iter()
+                .find_map(|l| l.strip_prefix("tags:").map(|v| split_comment(v).0.to_string()));
+            for t in tags.as_deref().and_then(list).unwrap_or_default() {
+                *counts.entry(t.to_string()).or_default() += 1;
+            }
+        }
+        let mut counts: Vec<_> = counts.into_iter().collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        counts
+    }
+
+    /// Warnings for tags that are probably one tag spelled two ways: plural/singular or a missing letter.
+    fn similar_tags(&self) -> Vec<Issue> {
+        let counts = self.tag_counts();
+        let mut out = vec![];
+        for (i, (a, na)) in counts.iter().enumerate() {
+            for (b, nb) in &counts[i + 1..] {
+                let (sa, sb) = (singular(a), singular(b));
+                // A missing/extra letter (coffee/cofee), not a swapped one: class/glass are different words.
+                let typo = sa.len().min(sb.len()) >= 4 && sa.len() != sb.len() && levenshtein(&sa, &sb) == 1;
+                if sa == sb || typo {
+                    out.push(Issue {
+                        path: "tags".into(),
+                        msg: format!("similar tags: {a} ({na}), {b} ({nb}): pick one"),
+                        warn: true,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Warnings for same-type notes that look like the same thing: a shared name/alias/title, one name
@@ -188,8 +222,9 @@ impl<'a> Vault<'a> {
                 None => err(format!("tags must be a [a, b] list, got {v:?}")),
                 Some(tags) => {
                     for tag in tags {
-                        if !self.tags.is_empty() && !self.tags.contains(tag) {
-                            err(format!("unknown tag '{tag}': use one from _meta/tags.md, or add it there"));
+                        let normal = normalize_tag(tag);
+                        if tag != normal {
+                            err(format!("tag '{tag}' should be '{normal}' (lowercase, words joined with -)"));
                         }
                     }
                 }
@@ -262,6 +297,23 @@ fn split_comment(v: &str) -> (&str, Option<&str>) {
 fn list(v: &str) -> Option<Vec<&str>> {
     let inner = v.trim().strip_prefix('[')?.strip_suffix(']')?;
     Some(inner.split(',').map(|s| s.trim().trim_matches(['"', '\'']).trim()).filter(|s| !s.is_empty()).collect())
+}
+
+/// "Home Cooking" → "home-cooking".
+fn normalize_tag(t: &str) -> String {
+    name_tokens(t).join("-")
+}
+
+/// Crude English singular, only for comparing tags: "breads" → "bread", "dishes" → "dish".
+fn singular(t: &str) -> String {
+    for suffix in ["ies", "es", "s"] {
+        if let Some(stem) = t.strip_suffix(suffix) {
+            if stem.len() >= 3 && !t.ends_with("ss") {
+                return if suffix == "ies" { format!("{stem}y") } else { stem.to_string() };
+            }
+        }
+    }
+    t.to_string()
 }
 
 /// "Ichiran Namba!" → ["ichiran", "namba"].
@@ -348,7 +400,6 @@ mod tests {
     }
 
     const PLACE: &str = "---\ntype: place\ntags: []\ncity:\nstatus:  # want | visited\nupdated:\n---\n# Name\n";
-    const TAGS: &str = "- food\n- travel\n";
 
     fn errors(files: &[(&str, &str)], rel: &str) -> Vec<String> {
         let dir = vault(files);
@@ -358,19 +409,19 @@ mod tests {
     #[test]
     fn valid_note_passes() {
         let note = "---\ntype: place\ntags: [food]\ncity: Osaka\nstatus: visited\nupdated: 2026-10-03\n---\n# Ichiran\n";
-        let e = errors(&[("_templates/place.md", PLACE), ("_meta/tags.md", TAGS), ("notes/ichiran.md", note)], "notes/ichiran.md");
+        let e = errors(&[("_templates/place.md", PLACE), ("notes/ichiran.md", note)], "notes/ichiran.md");
         assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]
     fn reports_schema_problems() {
-        let note = "---\ntype: place\ntags: [food, snacks]\nstatus: been\nupdated: yesterday\n---\n[[nowhere]] [[ok|alias]]\n";
+        let note = "---\ntype: place\ntags: [food, Street Food]\nstatus: been\nupdated: yesterday\n---\n[[nowhere]] [[ok|alias]]\n";
         let e = errors(
-            &[("_templates/place.md", PLACE), ("_meta/tags.md", TAGS), ("notes/Bad_Name.md", note), ("notes/ok.md", "")],
+            &[("_templates/place.md", PLACE), ("notes/Bad_Name.md", note), ("notes/ok.md", "")],
             "notes/Bad_Name.md",
         );
         let all = e.join("\n");
-        for want in ["kebab", "unknown tag 'snacks'", "updated must be", "missing field 'city'", "\"been\" is not one of", "broken link [[nowhere]]"] {
+        for want in ["kebab", "tag 'Street Food' should be 'street-food'", "updated must be", "missing field 'city'", "\"been\" is not one of", "broken link [[nowhere]]"] {
             assert!(all.contains(want), "missing {want:?} in:\n{all}");
         }
         assert!(!all.contains("[[ok]]"), "alias link should resolve:\n{all}");
@@ -441,6 +492,28 @@ mod tests {
         ]);
         let msgs: Vec<String> = v.duplicates(None).iter().map(|i| format!("{} {}", i.path, i.msg)).collect();
         assert_eq!(msgs, ["notes/piranesi.md possible duplicate of [[the-house]] (similar content)"]);
+    }
+
+    #[test]
+    fn similar_tags_are_warned() {
+        let note = |tags: &str| format!("---\ntags: [{tags}]\nupdated: 2026-10-03\n---\n");
+        let dir = vault(&[
+            ("me/a.md", &note("bread, coffee, glass")),
+            ("me/b.md", &note("breads, cofee, dishes")),
+            ("me/c.md", &note("bread, dish, class")),
+        ]);
+        let v = Vault::load(&dir.0);
+        assert_eq!(v.tag_counts()[0], ("bread".to_string(), 2));
+        let mut msgs: Vec<String> = v.similar_tags().into_iter().map(|i| i.msg).collect();
+        msgs.sort();
+        assert_eq!(
+            msgs,
+            [
+                "similar tags: bread (2), breads (1): pick one",
+                "similar tags: cofee (1), coffee (1): pick one",
+                "similar tags: dish (1), dishes (1): pick one",
+            ]
+        );
     }
 
     #[test]

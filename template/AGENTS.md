@@ -12,7 +12,7 @@ inbox/        raw dumps, one file per item, unsorted
 me/           preferences.md, favorites.md, interests.md — hubs: short facts about the owner + links to notes
 notes/        one note per thing (place, media, product, person, recipe, topic), flat, no subfolders
 _templates/   one template per note type; its frontmatter is the schema
-_meta/        tags.md (allowed tags), rules.md (owner's extra rules)
+_meta/        rules.md (owner's extra rules)
 ```
 
 ## Notes
@@ -22,7 +22,7 @@ _meta/        tags.md (allowed tags), rules.md (owner's extra rules)
 - Frontmatter is flat `key: value` lines. Lists only as `[a, b]`. No nesting, no multi-line values.
 - Keep every field from the template; leave the value empty if unknown. Where the template shows `# a | b | c`, the value must be one of those. Don't copy the `#` comment into notes.
 - `aliases`: other names someone might use for the same thing: short name, full name, original title, common misspelling. Search them before creating a note.
-- `tags`: only tags listed in `_meta/tags.md`. Add a new tag there only when nothing existing fits.
+- `tags`: lowercase, words joined with `-`, singular (`bread`, `street-food`). Run `brain tags` and reuse an existing tag before inventing a new one. A few broad, reusable tags beat many one-off ones; specifics belong in the text and `aliases`. Don't repeat the `type` as a tag.
 - `updated`: today's date (YYYY-MM-DD) whenever you change the note.
 - Body: `# Title`, then facts as dated bullets, oldest first: `- 2026-10-03 · tonkotsu, solo booths, worth the queue`. When something changes, add a new dated bullet; keep the old one.
 - End with `Related: [[a]] [[b]]`. Only link notes that exist or that you create.
@@ -53,7 +53,7 @@ For each file in `inbox/` (skip `.gitkeep`), oldest first:
 1. Turn it into notes per the rules above (update existing or create from templates), linked from hubs where relevant.
 2. Delete the inbox file with `git rm` (history keeps the original).
 3. If an item is ambiguous, leave it in `inbox/` and list it in your summary.
-Then run `brain lint`. For each "possible duplicate" that is clearly the same thing, merge (see Merge). Commit and report: what went where, what was left, which duplicates you merged or skipped.
+Then run `brain lint`. For each "possible duplicate" that is clearly the same thing, merge (see Merge). For each "similar tags" warning, pick one spelling and rewrite it in every note that uses the other. Commit and report: what went where, what was left, which duplicates you merged or skipped.
 
 ### Restructure — bring the vault in line with these rules
 For every file in `notes/` and `me/`: set `type` and all template fields, turn facts into dated bullets (use the file's git history for dates; else today), move entities out of `me/*.md` into their own notes, fix tags and links. Then run `brain lint`, fix every error, and merge clear duplicates. Commit, then report what changed.
@@ -65,7 +65,7 @@ For every file in `notes/` and `me/`: set `type` and all template fields, turn f
 
 ## Checks
 
-`brain search "<query>"` ranks notes by words and meaning, with a snippet each. `brain lint` checks the whole vault: frontmatter fields and allowed values, tags, links, filenames, orphans, possible duplicates. Run it whenever you want.
+`brain search "<query>"` ranks notes by words and meaning, with a snippet each. `brain tags` lists tags in use. `brain lint` checks the whole vault: frontmatter fields and allowed values, tag format, links, filenames, orphans, possible duplicates, similar tags. Run it whenever you want.
 When you finish, `brain` also checks the files you changed. If anything is wrong you'll get one follow-up message listing the problems. Fix exactly those, then commit.
 
 ## Git

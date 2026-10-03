@@ -74,16 +74,16 @@ Requests run one at a time per vault, via a lock in `.git/brain.lock` that `serv
 ## Vault structure
 
 ```
-inbox/  me/  notes/  _templates/  _meta/tags.md  _meta/rules.md
+inbox/  me/  notes/  _templates/  _meta/rules.md
 ```
 
 - Every note in `notes/` has a `type` (`place`, `media`, `product`, `person`, `recipe`, `topic`). Its frontmatter fields come from `_templates/<type>.md`; a `# a | b` comment there lists the allowed values.
-- Tags must be listed in `_meta/tags.md`. Facts are dated bullets (`- 2026-10-03 · …`). `me/*.md` are hubs linking to notes.
-- The vault is its own schema: edit `_templates/` and `_meta/tags.md` to add types, fields or tags. Put your own agent rules in `_meta/rules.md`.
+- Tags are free-form, lowercase-kebab (`street-food`); `brain tags` lists them with counts. Facts are dated bullets (`- 2026-10-03 · …`). `me/*.md` are hubs linking to notes.
+- The vault is its own schema: edit `_templates/` to add types or fields. Put your own agent rules in `_meta/rules.md`.
 
 - `aliases: [..]` (Obsidian's own field) holds other names for the same thing, so the agent finds an existing note instead of creating a second one.
 
-`brain lint` checks every note against that schema: fields, allowed values, tags, `[[links]]`, filenames, plus warnings for orphan notes and possible duplicates (same type, plus a shared name/alias/title, one name inside the other, or a near-typo). It exits 1 on errors.
+`brain lint` checks every note against that schema: fields, allowed values, tag format, `[[links]]`, filenames, plus warnings for orphan notes, similar tags (`bread`/`breads`, `coffee`/`cofee`) and possible duplicates (same type, plus a shared name/alias/title, one name inside the other, or a near-typo). It exits 1 on errors.
 The agent may run `brain lint` itself. Tidy and Restructure use it to find duplicates, and merge the clear ones (`merge X and Y` works in chat too).
 After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply. Possible duplicates are listed too, but never merged without asking.
 
