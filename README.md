@@ -15,6 +15,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 | `src/lint.rs` | Vault structure checks (no LLM). |
 | `src/search.rs` | Hybrid search: BM25 full-text + local embeddings. |
 | `src/fetch.rs` | `brain fetch`: web page → plain text, fenced as untrusted. |
+| `src/mcp.rs` | `brain mcp`: MCP server for agents in other projects. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
 
@@ -100,6 +101,26 @@ What makes it more than a notebook (see [VISION.md](VISION.md)):
 - **Provenance:** your facts are dated bullets in your words. Anything the LLM writes sits under a `(LLM)` heading or in a generated file.
 
 Fetched pages are untrusted input to an agent that can edit the vault. The output is fenced as data and `AGENTS.md` says to ignore instructions in it, but that's mitigation, not a guarantee. The agent can only edit the vault and run git, so the damage is limited to reversible commits.
+
+## Use it from other projects (MCP)
+
+`brain mcp` is an MCP server on stdio, so agents in any project can consult the brain:
+
+| Tool | What |
+|---|---|
+| `brain_profile(section?)` | The profile, or one section (e.g. `Work & tools`). |
+| `brain_search(query)` | Search notes by words and meaning. |
+| `brain_note(name)` | One note in full. |
+| `brain_remember(text, source?)` | Save a preference the agent noticed, **to `inbox/` only**. Tidy files it (usually into `me/work.md`) with its source. |
+
+Notes tagged `private` are never served: not in search, not by name. The profile never draws on them either.
+Whatever an agent reads is sent to that agent's LLM provider.
+
+Register it for Claude Code (all projects):
+```sh
+claude mcp add --scope user brain -e VAULT_DIR=$HOME/brain -- /path/to/brain mcp
+```
+Then add a standing rule to `~/.claude/CLAUDE.md`, e.g.: *Before choosing languages, tools, architecture or style for me, check `brain_profile` (section "Work & tools"). When I state a lasting preference or correct your choice, save it with `brain_remember`.*
 
 ## Search
 

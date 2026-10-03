@@ -8,6 +8,7 @@
 //!   brain search <q>   hybrid full-text + semantic search, top matches with snippets
 //!   brain tags         tags in use, with counts
 //!   brain fetch <url>  a web page as plain text (for the Link workflow)
+//!   brain mcp          MCP server on stdio: profile, search, notes, remember (for agents in other projects)
 //!   brain lint         check vault structure against _templates/ (no LLM)
 //!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
@@ -18,6 +19,7 @@
 
 mod fetch;
 mod lint;
+mod mcp;
 mod search;
 
 use std::fs::{self, File};
@@ -60,6 +62,7 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("_templates/entity.md", include_str!("../template/_templates/entity.md")),
     ("_templates/source.md", include_str!("../template/_templates/source.md")),
     ("me/profile.md", include_str!("../template/me/profile.md")),
+    ("me/work.md", include_str!("../template/me/work.md")),
     ("_meta/rules.md", include_str!("../template/_meta/rules.md")),
     ("inbox/.gitkeep", ""),
     ("notes/.gitkeep", ""),
@@ -86,15 +89,16 @@ fn main() {
         ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
         ["lint"] => lint_cmd(&vault_dir()),
         ["fetch", url] => fetch::fetch(url).map(|t| println!("{t}")),
+        ["mcp"] => mcp::serve(&vault_dir()),
         ["tags"] => {
             for (tag, n) in lint::Vault::load(&vault_dir()).tag_counts() {
                 println!("{n:>4}  {tag}");
             }
             Ok(())
         }
-        ["search", q] => search_cmd(&vault_dir(), q).map(|r| println!("{r}")),
+        ["search", q] => search_cmd(&vault_dir(), q, true).map(|r| println!("{r}")),
         ["upgrade"] => upgrade(&vault_dir()),
-        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | tags | fetch <url> | lint | upgrade".into()),
+        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | tags | fetch <url> | mcp | lint | upgrade".into()),
     };
     if let Err(e) = res {
         eprintln!("error: {e}");
@@ -126,8 +130,8 @@ fn init(dir: &Path) -> Result<()> {
 }
 
 /// Search results as plain text: one `[[note]] title: snippet` line per hit.
-fn search_cmd(vault: &Path, query: &str) -> Result<String> {
-    let hits = search::search(vault, query, 8)?;
+fn search_cmd(vault: &Path, query: &str, include_private: bool) -> Result<String> {
+    let hits = search::search(vault, query, 8, include_private)?;
     if hits.is_empty() {
         return Ok(format!("No matches for {query:?}."));
     }
@@ -434,7 +438,7 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
             };
             let reply = match (msg.strip_prefix('+'), msg.strip_prefix('?')) {
                 (Some(text), _) => capture(&cfg.vault, text.trim()),
-                (_, Some(q)) => search_cmd(&cfg.vault, q.trim()),
+                (_, Some(q)) => search_cmd(&cfg.vault, q.trim(), true),
                 _ => ask(&cfg.vault, &with_history(&msg, &body["history"]), &mut |ev| send(match ev {
                     Event::Delta(t) => json!({ "type": "delta", "text": t }),
                     Event::Status(t) => json!({ "type": "status", "text": t }),
@@ -464,7 +468,7 @@ fn lock(vault: &Path) -> Result<File> {
 /// Fast path: write raw text to inbox/ and commit, no LLM.
 fn capture(vault: &Path, text: &str) -> Result<String> {
     let mut slug = String::new();
-    for c in text.to_lowercase().chars().take(40) {
+    for c in text.lines().next().unwrap_or("").to_lowercase().chars().take(40) {
         if c.is_ascii_alphanumeric() {
             slug.push(c);
         } else if !slug.ends_with('-') {

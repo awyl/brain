@@ -216,6 +216,8 @@ impl<'a> Vault<'a> {
         rels.iter()
             .filter(|rel| rel.starts_with("notes/") && self.root.join(rel).exists())
             .filter(|rel| !linked.contains(&stem(rel).to_lowercase()))
+            // Private notes may not be linked from hubs, so being unlinked is fine for them.
+            .filter(|rel| !crate::search::is_private(&fs::read_to_string(self.root.join(rel)).unwrap_or_default()))
             .map(|rel| Issue {
                 path: rel.clone(),
                 msg: "orphan: link it from a me/ hub or a related note".into(),
@@ -483,7 +485,8 @@ mod tests {
     #[test]
     fn orphans_are_warnings() {
         let note = "---\ntype: topic\ntags: []\nupdated: 2026-10-03\n---\n";
-        let dir = vault(&[("_templates/topic.md", "---\ntype: topic\ntags: []\nupdated:\n---\n"), ("notes/lonely.md", note), ("notes/linked.md", note), ("me/favorites.md", "---\ntags: []\nupdated: 2026-10-03\n---\n- [[linked]]\n"), ("AGENTS.md", "e.g. [[lonely]]\n")]);
+        let secret = "---\ntype: topic\ntags: [private]\nupdated: 2026-10-03\n---\n";
+        let dir = vault(&[("_templates/topic.md", "---\ntype: topic\ntags: []\nupdated:\n---\n"), ("notes/lonely.md", note), ("notes/linked.md", note), ("notes/secret.md", secret), ("me/favorites.md", "---\ntags: []\nupdated: 2026-10-03\n---\n- [[linked]]\n"), ("AGENTS.md", "e.g. [[lonely]]\n")]);
         let issues = Vault::load(&dir.0).check_all();
         let orphans: Vec<_> = issues.iter().filter(|i| i.warn).map(|i| i.path.as_str()).collect();
         assert_eq!(orphans, ["notes/lonely.md"]);

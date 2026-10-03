@@ -131,6 +131,14 @@ fn docs(vault: &Path) -> Vec<Doc> {
         .collect()
 }
 
+/// Tagged `private`: never leaves the vault through `brain mcp`.
+pub fn is_private(text: &str) -> bool {
+    let (front, _) = split_frontmatter(text);
+    front.lines().find_map(|l| l.strip_prefix("tags:")).is_some_and(|t| {
+        t.trim().trim_matches(['[', ']']).split(',').any(|tag| tag.trim() == "private")
+    })
+}
+
 /// What gets embedded: the body (title + facts) plus aliases. Frontmatter is left out on purpose:
 /// shared fields like `city: Osaka` would make every note in a city look alike.
 fn semantic_text(text: &str) -> String {
@@ -140,7 +148,7 @@ fn semantic_text(text: &str) -> String {
     if aliases.is_empty() { body.to_string() } else { format!("{body}\nAlso known as: {aliases}") }
 }
 
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub fn split_frontmatter(text: &str) -> (&str, &str) {
     if let Some(rest) = text.strip_prefix("---\n") {
         if let Some(i) = rest.find("\n---") {
             let body = rest[i + 4..].trim_start_matches(|c| c != '\n').trim_start();
@@ -227,9 +235,9 @@ pub struct Hit {
     pub how: String,
 }
 
-/// Top `k` files for `query`, best first.
-pub fn search(vault: &Path, query: &str, k: usize) -> Result<Vec<Hit>> {
-    let docs = docs(vault);
+/// Top `k` files for `query`, best first. `include_private: false` skips notes tagged `private`.
+pub fn search(vault: &Path, query: &str, k: usize, include_private: bool) -> Result<Vec<Hit>> {
+    let docs: Vec<Doc> = docs(vault).into_iter().filter(|d| include_private || !is_private(&d.text)).collect();
     let q: Vec<String> = tokens(query).into_iter().filter(|t| !STOPWORDS.contains(&t.as_str())).collect();
 
     // Full text: BM25 over frontmatter values (not keys) and body; title and aliases count three times.
@@ -367,6 +375,13 @@ mod tests {
     fn semantic_text_skips_frontmatter_keeps_aliases() {
         let t = "---\ntype: place\naliases: [Ichiran]\ncity: Osaka\n---\n# Ichiran Namba\n- 2026-10-03 · good\n";
         assert_eq!(semantic_text(t), "# Ichiran Namba\n- 2026-10-03 · good\n\nAlso known as: Ichiran");
+    }
+
+    #[test]
+    fn private_tag() {
+        assert!(is_private("---\ntags: [health, private]\n---\n# x\n"));
+        assert!(!is_private("---\ntags: [privateer]\n---\n# x\n"));
+        assert!(!is_private("# no frontmatter, tags: [private]\n"));
     }
 
     #[test]
