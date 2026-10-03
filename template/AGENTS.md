@@ -14,7 +14,7 @@ notes/   one atomic note per topic/thing/place/person (flat, no subfolders)
 ## Conventions
 
 - Filenames: lowercase-kebab-case, e.g. `notes/osaka-ramen.md`.
-- Inbox filenames: `inbox/YYYY-MM-DD-HHMM-short-slug.md`. Content can be anything: a sentence, a link, a pasted article.
+- Inbox filenames: `inbox/YYYY-MM-DD-HHMMSS-short-slug.md`. Content can be anything: a sentence, a link, a pasted article.
 - Every note in `me/` and `notes/` starts with frontmatter:
   ```
   ---
@@ -28,6 +28,8 @@ notes/   one atomic note per topic/thing/place/person (flat, no subfolders)
 - Never store secrets (passwords, tokens, card numbers, ID numbers). Refuse and say why.
 
 ## Workflows
+
+Replies are usually read on a phone: keep them short, plain text, no preamble.
 
 ### Capture — "remember …", "I like …", "save this …"
 1. If it clearly belongs in an existing note or `me/*.md`, add it there under the right heading.
@@ -44,7 +46,7 @@ notes/   one atomic note per topic/thing/place/person (flat, no subfolders)
 For each file in `inbox/` (skip `.gitkeep`), oldest first:
 1. Extract the facts. Merge into an existing note, `me/*.md`, or a new note in `notes/`.
 2. Add tags, `updated:`, and `[[links]]`.
-3. Delete the inbox file (git history keeps the original).
+3. Delete the inbox file with `git rm` (history keeps the original).
 4. If an item is ambiguous, leave it in `inbox/` and list it in your summary.
 Then commit and report: what went where, what was left.
 
