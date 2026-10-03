@@ -1,1 +1,8 @@
 /target
+
+# local env
+.env
+.direnv/
+
+# local vault (its own git repo)
+/brain/
