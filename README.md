@@ -13,6 +13,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 |---|---|
 | `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`, `lint`, `upgrade`. |
 | `src/lint.rs` | Vault structure checks (no LLM). |
+| `src/search.rs` | Hybrid search: BM25 full-text + local embeddings. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
 
@@ -20,7 +21,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 
 ```sh
 cargo build --release                         # → target/release/brain (one file, copy anywhere)
-# fully static, runs on any x86_64 Linux: cargo build --release --target x86_64-unknown-linux-musl
+# fully static, runs on any x86_64 Linux (~9MB): cargo build --release --target x86_64-unknown-linux-musl
 brain init ~/brain                            # once: create the vault repo
 VAULT_DIR=~/brain brain serve                 # listens on 127.0.0.1:8787 (HOST/PORT to change)
 VAULT_DIR=~/brain brain tunnel                # same, plus a public https://*.trycloudflare.com URL
@@ -60,6 +61,7 @@ Backup setup, once: create a private repo, then `git -C ~/brain remote add origi
 ## Using it
 
 - `+ anything`: saved raw to `inbox/` instantly, with no LLM call.
+- `? anything`: search the vault directly, with no LLM call. Top notes with a snippet each.
 - `remember I prefer window seats`: the agent files it and commits.
 - `what coffee do I like?`: the agent searches the vault and answers with a source link.
 - `tidy the inbox`: runs the Tidy workflow now.
@@ -86,6 +88,23 @@ The agent may run `brain lint` itself. Tidy and Restructure use it to find dupli
 After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply. Possible duplicates are listed too, but never merged without asking.
 
 `brain upgrade` updates an existing vault from the binary's template. It overwrites `AGENTS.md`, `CLAUDE.md` and `.claude/commands/tidy.md`, adds missing files, and never touches anything else. Then send `restructure the vault` to convert old notes.
+
+## Search
+
+`brain search "cozy place for a flat white"` combines two rankings:
+- **Full text (BM25):** words in the body, frontmatter values, titles and aliases (counted 3×). Pure Rust, no index.
+- **Meaning:** a local embedding model, downloaded on first use to `~/.cache/brain/models/`. The vectors live in `$VAULT_DIR/.git/brain-index.json` (never committed) and get updated incrementally after every agent run. `serve` builds the index at startup.
+
+The two lists are merged by reciprocal rank fusion. Each hit shows why it matched (`text 7.0, meaning 0.65`).
+The agent uses `brain search` before creating a note (to avoid duplicates) and to answer fuzzy questions.
+
+| Var | Effect |
+|---|---|
+| `BRAIN_EMBED` | `english` (default, `bge-small-en-v1.5`, ~130MB) or `multilingual` (`multilingual-e5-small`, ~470MB). |
+| `BRAIN_SEMANTIC=0` | Full-text only: no model download, no index. |
+| `BRAIN_MIN_SIM` / `BRAIN_DUP_SIM` | Tuning: the semantic match floor (0.58), and the content similarity that flags a duplicate (0.90). |
+
+Small embedding models can't tell "the same book" from "two books on the same topic" by content alone. That's why content duplicates are only flagged for near-copies, and the main defense is searching before creating.
 
 ## Swapping the LLM
 

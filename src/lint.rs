@@ -34,6 +34,9 @@ pub struct Vault<'a> {
     tags: HashSet<String>,
     /// Lowercased basenames of every note, for resolving [[links]] the way Obsidian does.
     names: HashSet<String>,
+    /// Up-to-date embeddings from the search index (empty if there's none): content-level duplicates.
+    vectors: HashMap<String, Vec<f32>>,
+    dup_threshold: f32,
 }
 
 impl<'a> Vault<'a> {
@@ -62,7 +65,8 @@ impl<'a> Vault<'a> {
             .filter_map(|l| l.strip_prefix("- ")?.split_whitespace().next().map(str::to_string))
             .collect();
         let names = md_files(root, "").iter().map(|p| stem(p).to_lowercase()).collect();
-        Vault { root, types, tags, names }
+        let vectors = if crate::search::semantic_enabled() { crate::search::fresh_vectors(root) } else { HashMap::new() };
+        Vault { root, types, tags, names, vectors, dup_threshold: crate::search::dup_threshold() }
     }
 
     /// Every note in notes/ and me/, plus orphan warnings.
@@ -76,7 +80,8 @@ impl<'a> Vault<'a> {
     }
 
     /// Warnings for same-type notes that look like the same thing: a shared name/alias/title, one name
-    /// inside the other (`ichiran` / `ichiran-namba`), or a near-typo. With `only`, just pairs touching those paths.
+    /// inside the other (`ichiran` / `ichiran-namba`), a near-typo, or near-identical content (embeddings).
+    /// With `only`, just pairs touching those paths.
     pub fn duplicates(&self, only: Option<&[String]>) -> Vec<Issue> {
         struct Note {
             rel: String,
@@ -114,12 +119,17 @@ impl<'a> Vault<'a> {
                     continue;
                 }
                 let (ka, kb) = (a.tokens.concat(), b.tokens.concat());
-                let similar = !a.keys.is_disjoint(&b.keys)
+                let named = !a.keys.is_disjoint(&b.keys)
                     || subset(&a.tokens, &b.tokens)
                     || subset(&b.tokens, &a.tokens)
                     || (ka.len().min(kb.len()) >= 6 && levenshtein(&ka, &kb) <= 2);
-                if similar {
-                    out.push(Issue { path: a.rel.clone(), msg: format!("possible duplicate of [[{}]]", stem(&b.rel)), warn: true });
+                let content = match (self.vectors.get(&a.rel), self.vectors.get(&b.rel)) {
+                    (Some(va), Some(vb)) => crate::search::cosine(va, vb) >= self.dup_threshold,
+                    _ => false,
+                };
+                if named || content {
+                    let why = if named { "" } else { " (similar content)" };
+                    out.push(Issue { path: a.rel.clone(), msg: format!("possible duplicate of [[{}]]{why}", stem(&b.rel)), warn: true });
                 }
             }
         }
@@ -416,6 +426,21 @@ mod tests {
             ]
         );
         assert_eq!(v.duplicates(Some(&["notes/piranesy.md".to_string()])).len(), 1);
+    }
+
+    #[test]
+    fn content_duplicates_use_vectors() {
+        let t = "---\ntype: topic\ntags: []\naliases: []\nupdated:\n---\n";
+        let dir = vault(&[("_templates/topic.md", t), ("notes/the-house.md", t), ("notes/piranesi.md", t), ("notes/other.md", t)]);
+        let mut v = Vault::load(&dir.0);
+        v.dup_threshold = 0.9;
+        v.vectors = HashMap::from([
+            ("notes/the-house.md".into(), vec![1.0, 0.0]),
+            ("notes/piranesi.md".into(), vec![0.99, 0.141]),
+            ("notes/other.md".into(), vec![0.0, 1.0]),
+        ]);
+        let msgs: Vec<String> = v.duplicates(None).iter().map(|i| format!("{} {}", i.path, i.msg)).collect();
+        assert_eq!(msgs, ["notes/piranesi.md possible duplicate of [[the-house]] (similar content)"]);
     }
 
     #[test]

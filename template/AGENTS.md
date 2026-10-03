@@ -38,13 +38,13 @@ _meta/        tags.md (allowed tags), rules.md (owner's extra rules)
 Replies are usually read on a phone: keep them short, plain text, no preamble.
 
 ### Capture — "remember …", "I like …", "save this …"
-1. Search for an existing note (filenames, titles, `aliases`, tags). Update it, or create a new one from the matching template. Never create a second note for the same thing.
+1. Run `brain search "<name and a few key words>"` to find an existing note: it matches names, aliases, content and meaning ("Piranesi" finds a note titled "The House of Halls"). Update it, or create a new one from the matching template. Never create a second note for the same thing.
 2. Link every new note from somewhere: the right `me/*.md` hub (favorites, preferences, interests) and/or a related note. Unlinked notes get lost. Don't ask, just link.
 3. Set `updated:` and `Related:` links.
 4. Commit.
 
 ### Query — "what's my …", "did I …", "find …"
-1. Search the vault first (file contents, filenames, frontmatter fields, tags, links). Never answer personal facts from memory or guesswork.
+1. Search the vault first: `brain search "<question in your own words>"` for fuzzy recall, then grep for exact facts and fields. Never answer personal facts from memory or guesswork.
 2. Answer briefly and cite the source note(s) as `[[note-name]]`.
 3. If nothing is found, say so and offer to capture it.
 
@@ -65,7 +65,7 @@ For every file in `notes/` and `me/`: set `type` and all template fields, turn f
 
 ## Checks
 
-`brain lint` checks the whole vault: frontmatter fields and allowed values, tags, links, filenames, orphans, possible duplicates. Run it whenever you want.
+`brain search "<query>"` ranks notes by words and meaning, with a snippet each. `brain lint` checks the whole vault: frontmatter fields and allowed values, tags, links, filenames, orphans, possible duplicates. Run it whenever you want.
 When you finish, `brain` also checks the files you changed. If anything is wrong you'll get one follow-up message listing the problems. Fix exactly those, then commit.
 
 ## Git

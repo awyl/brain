@@ -5,6 +5,7 @@
 //!   brain tunnel       serve + a public Cloudflare tunnel (downloads cloudflared if needed):
 //!                      named tunnel if TUNNEL_TOKEN is set (TUNNEL_HOSTNAME for the printed URL), else a quick tunnel
 //!   brain ask <msg>    run the agent once (for cron), print the reply
+//!   brain search <q>   hybrid full-text + semantic search, top matches with snippets
 //!   brain lint         check vault structure against _templates/ and _meta/tags.md (no LLM)
 //!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
@@ -14,6 +15,7 @@
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
 
 mod lint;
+mod search;
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -28,7 +30,7 @@ use tiny_http::{Header, Method, Response, Server};
 // An argument list, not a string, because `Bash(brain lint:*)` contains a space.
 const DEFAULT_AGENT_CMD: &[&str] = &[
     "claude", "-p", "--setting-sources", "project", "--strict-mcp-config", "--permission-mode", "acceptEdits",
-    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*)",
+    "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*)",
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
 ];
 
@@ -77,8 +79,9 @@ fn main() {
         ["tunnel"] => tunnel(),
         ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
         ["lint"] => lint_cmd(&vault_dir()),
+        ["search", q] => search_cmd(&vault_dir(), q).map(|r| println!("{r}")),
         ["upgrade"] => upgrade(&vault_dir()),
-        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | lint | upgrade".into()),
+        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | search <query> | lint | upgrade".into()),
     };
     if let Err(e) = res {
         eprintln!("error: {e}");
@@ -107,6 +110,23 @@ fn init(dir: &Path) -> Result<()> {
     git(dir, &["commit", "-qm", "init vault"])?;
     println!("vault created at {}", dir.display());
     Ok(())
+}
+
+/// Search results as plain text: one `[[note]] title: snippet` line per hit.
+fn search_cmd(vault: &Path, query: &str) -> Result<String> {
+    let hits = search::search(vault, query, 8)?;
+    if hits.is_empty() {
+        return Ok(format!("No matches for {query:?}."));
+    }
+    Ok(hits
+        .iter()
+        .map(|h| {
+            let name = Path::new(&h.rel).file_stem().unwrap_or_default().to_string_lossy();
+            let dir = if h.rel.starts_with("notes/") { String::new() } else { format!("{} ", h.rel) };
+            format!("[[{name}]] {dir}{}: {}  ({})", h.title, h.snippet, h.how)
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 fn lint_cmd(vault: &Path) -> Result<()> {
@@ -209,6 +229,14 @@ fn run(server: Server, cfg: Config) {
         println!("tidy scheduled daily at {at}");
         thread::spawn(move || tidy_daily(&vault, at));
     }
+    if search::semantic_enabled() {
+        let vault = cfg.vault.clone();
+        // Download the model and index the vault up front, so the first search doesn't wait.
+        thread::spawn(move || match search::update_index(&vault) {
+            Ok((v, n)) => eprintln!("search index: {} files ({n} embedded)", v.len()),
+            Err(e) => eprintln!("search index unavailable (full-text only): {e}"),
+        });
+    }
     let cfg = std::sync::Arc::new(cfg);
     for req in server.incoming_requests() {
         let cfg = cfg.clone();
@@ -299,12 +327,7 @@ fn cloudflared() -> Result<PathBuf> {
     if Command::new("cloudflared").arg("--version").output().is_ok_and(|o| o.status.success()) {
         return Ok("cloudflared".into());
     }
-    let cache = env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .ok_or("set HOME or XDG_CACHE_HOME")?
-        .join("brain");
-    let bin = cache.join("cloudflared");
+    let bin = cache_dir()?.join("cloudflared");
     if bin.exists() {
         return Ok(bin);
     }
@@ -313,16 +336,30 @@ fn cloudflared() -> Result<PathBuf> {
         ("linux", "aarch64") => "arm64",
         (os, arch) => return Err(format!("no cloudflared download for {os}/{arch}; install it on PATH").into()),
     };
-    let url = format!("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}");
-    println!("downloading {url}");
-    fs::create_dir_all(&cache)?;
-    let tmp = cache.join("cloudflared.part");
-    if !Command::new("curl").args(["-fsSL", "-o"]).arg(&tmp).arg(&url).status()?.success() {
-        return Err("cloudflared download failed".into());
-    }
-    fs::set_permissions(&tmp, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
-    fs::rename(&tmp, &bin)?;
+    download(&format!("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"), &bin)?;
+    fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     Ok(bin)
+}
+
+/// $XDG_CACHE_HOME/brain or ~/.cache/brain: downloaded cloudflared and embedding models.
+fn cache_dir() -> Result<PathBuf> {
+    Ok(env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or("set HOME or XDG_CACHE_HOME")?
+        .join("brain"))
+}
+
+/// curl `url` to `dest` atomically (via a .part file), so an interrupted download is never mistaken for a good one.
+fn download(url: &str, dest: &Path) -> Result<()> {
+    eprintln!("downloading {url}");
+    fs::create_dir_all(dest.parent().unwrap())?;
+    let tmp = dest.with_extension("part");
+    if !Command::new("curl").args(["-fsSL", "-o"]).arg(&tmp).arg(url).status()?.success() {
+        return Err(format!("download failed: {url}").into());
+    }
+    fs::rename(&tmp, dest)?;
+    Ok(())
 }
 
 fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
@@ -363,9 +400,10 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
                 let data = format!("data: {ev}\n\n");
                 let _ = write!(w, "{:x}\r\n{data}\r\n", data.len()).and_then(|_| w.flush());
             };
-            let reply = match msg.strip_prefix('+') {
-                Some(text) => capture(&cfg.vault, text.trim()),
-                None => ask(&cfg.vault, &with_history(&msg, &body["history"]), &mut |ev| send(match ev {
+            let reply = match (msg.strip_prefix('+'), msg.strip_prefix('?')) {
+                (Some(text), _) => capture(&cfg.vault, text.trim()),
+                (_, Some(q)) => search_cmd(&cfg.vault, q.trim()),
+                _ => ask(&cfg.vault, &with_history(&msg, &body["history"]), &mut |ev| send(match ev {
                     Event::Delta(t) => json!({ "type": "delta", "text": t }),
                     Event::Status(t) => json!({ "type": "status", "text": t }),
                 })),
@@ -462,6 +500,12 @@ fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> 
         let left = check_changed(vault, &before)?;
         if !left.is_empty() {
             reply += &format!("\n\n⚠ {} structure problem(s) left:\n{}", left.len(), left.join("\n"));
+        }
+    }
+    // Refresh vectors for what changed, so the duplicate check below sees them too.
+    if search::semantic_enabled() {
+        if let Err(e) = search::update_index(vault) {
+            eprintln!("search index update failed: {e}");
         }
     }
     // Possible duplicates are only flagged, never auto-merged: the owner decides.

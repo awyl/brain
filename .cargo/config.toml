@@ -1,0 +1,4 @@
+[env]
+# The static musl build needs a C compiler for onig (a C regex lib that candle pulls in via tokenizers).
+# No musl-gcc here; plain gcc works for onig's plain C, verified by identical search results and vectors.
+CC_x86_64_unknown_linux_musl = "gcc"
