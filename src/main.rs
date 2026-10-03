@@ -226,13 +226,21 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
     let ctype = |v: &str| Header::from_bytes("Content-Type", v).unwrap();
     let path = req.url().split('?').next().unwrap_or("/").to_string();
     match (req.method(), path.as_str()) {
-        (Method::Get, path) => match WEB.iter().find(|(p, ..)| *p == path || (*p == "/" && path == "/index.html")) {
-            Some((_, mime, body)) => req.respond(Response::from_string(*body).with_header(ctype(mime)))?,
-            None => req.respond(Response::empty(404))?,
-        },
+        (Method::Get, path) => {
+            eprintln!("GET {path}{}", if req.url().contains("token=") { " (with ?token=)" } else { "" });
+            match WEB.iter().find(|(p, ..)| *p == path || (*p == "/" && path == "/index.html")) {
+                Some((_, mime, body)) => req.respond(Response::from_string(*body).with_header(ctype(mime)))?,
+                None => req.respond(Response::empty(404))?,
+            }
+        }
         (Method::Post, "/api/chat") => {
             let auth = req.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str());
             if !auth.and_then(|a| a.strip_prefix("Bearer ")).is_some_and(|t| same(t, &cfg.token)) {
+                let why = match auth {
+                    None => "no Authorization header".to_string(),
+                    Some(a) => format!("wrong token (got {} chars, want Bearer + {})", a.len(), cfg.token.len()),
+                };
+                eprintln!("POST /api/chat 401: {why}");
                 return Ok(req.respond(Response::empty(401))?);
             }
             let mut body = String::new();
@@ -247,6 +255,7 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
                 None => ask(&cfg.vault, msg),
             }
             .unwrap_or_else(|e| format!("Error: {e}"));
+            eprintln!("POST /api/chat 200");
             let json = serde_json::json!({ "reply": reply }).to_string();
             req.respond(Response::from_string(json).with_header(ctype("application/json")))?
         }
