@@ -11,7 +11,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 
 | Path | What |
 |---|---|
-| `src/main.rs` | The whole server: `init`, `serve`, `ask`. |
+| `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules. |
 
@@ -21,10 +21,15 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 cargo build --release                         # → target/release/brain (one file, copy anywhere)
 brain init ~/brain                            # once: create the vault repo
 VAULT_DIR=~/brain brain serve                 # listens on 127.0.0.1:8787 (HOST/PORT to change)
-tailscale serve --bg 8787                     # private HTTPS on your tailnet
+VAULT_DIR=~/brain brain tunnel                # same, plus a public https://*.trycloudflare.com URL
 ```
 
-The server needs `git` and the agent CLI on `PATH`. On iPhone, open the Tailscale URL in Safari, then Share → Add to Home Screen.
+`serve` and `tunnel` print the URL with the access token, e.g. `https://xyz.trycloudflare.com/?token=…`.
+Open that on the phone in Safari, then Share → Add to Home Screen. The page saves the token on the device and asks for it if it's missing.
+
+- `tunnel` uses `cloudflared` from `PATH`, or downloads the official release once to `~/.cache/brain/cloudflared` (Linux amd64/arm64). `cloudflared` is stopped when `brain` exits.
+- The quick tunnel URL is random and **changes on every restart**, so re-open the new URL after a restart.
+- The server needs `git` and the agent CLI on `PATH`.
 
 Optional nightly inbox tidy (crontab):
 
@@ -49,4 +54,4 @@ Note: `AGENT_CMD` is split on whitespace, so it can't contain quoted arguments. 
 
 ## Security
 
-The server has no auth and binds to localhost. Only expose it through Tailscale (or similar), never directly to the internet.
+`/api/chat` requires `Authorization: Bearer <token>`. The token comes from `BRAIN_TOKEN`, else is generated once into `$VAULT_DIR/.git/brain-token` (mode 600, never committed). Anyone with the token can read and write the vault and run the agent, so treat the `?token=` URL like a password. To rotate it, delete the file and restart.

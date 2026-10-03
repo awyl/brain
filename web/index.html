@@ -36,6 +36,23 @@
 </form>
 <script>
 const log = document.getElementById('log'), t = document.getElementById('t'), b = document.getElementById('b');
+// Token: from ?token= once (then hidden from the URL), remembered on this device.
+const store = { get: () => { try { return localStorage.getItem('token') || ''; } catch { return ''; } },
+                set: v => { try { localStorage.setItem('token', v); } catch {} } };
+const urlToken = new URLSearchParams(location.search).get('token');
+if (urlToken) { store.set(urlToken); history.replaceState(null, '', location.pathname); }
+async function send(message) {
+  const post = () => fetch('api/chat', { method:'POST',
+    headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + store.get() },
+    body:JSON.stringify({message}) });
+  let r = await post();
+  if (r.status === 401) {
+    const tok = prompt('Access token (printed by brain serve):');
+    if (!tok) return r;
+    store.set(tok.trim()); r = await post();
+  }
+  return r;
+}
 function add(text, cls) {
   const d = document.createElement('div');
   d.className = 'msg ' + cls; d.textContent = text;
@@ -49,8 +66,8 @@ document.getElementById('f').addEventListener('submit', async e => {
   add(message, 'me'); t.value = ''; b.disabled = true;
   const pending = add('…', 'bot');
   try {
-    const r = await fetch('api/chat', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message}) });
-    pending.textContent = r.ok ? (await r.json()).reply : `Error ${r.status}`;
+    const r = await send(message);
+    pending.textContent = r.ok ? (await r.json()).reply : r.status === 401 ? 'Unauthorized: wrong or missing token.' : `Error ${r.status}`;
   } catch (err) {
     pending.textContent = 'Network error: ' + err.message;
   }
