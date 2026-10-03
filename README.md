@@ -12,13 +12,14 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 | Path | What |
 |---|---|
 | `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`. |
-| `web/` | Chat UI (installable PWA), compiled into the binary. |
+| `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules. |
 
 ## Setup
 
 ```sh
 cargo build --release                         # → target/release/brain (one file, copy anywhere)
+# fully static, runs on any x86_64 Linux: cargo build --release --target x86_64-unknown-linux-musl
 brain init ~/brain                            # once: create the vault repo
 VAULT_DIR=~/brain brain serve                 # listens on 127.0.0.1:8787 (HOST/PORT to change)
 VAULT_DIR=~/brain brain tunnel                # same, plus a public https://*.trycloudflare.com URL
@@ -63,7 +64,7 @@ Backup setup, once: create a private repo, then `git -C ~/brain remote add origi
 - `tidy the inbox`: runs the Tidy workflow now.
 
 Replies stream in live: tool steps (`› Edit me/favorites.md`) and text as they happen, then the final answer.
-The page sends the last 6 turns along with each message, so follow-ups ("and what about…") work. The history resets when the page reloads.
+The page sends the last 6 turns along with each message, so follow-ups ("and what about…") work. The chat survives reloads; tap **New** to start fresh.
 
 Requests run one at a time per vault, via a lock in `.git/brain.lock` that `serve` and cron `ask` share. Anything the agent leaves uncommitted gets an `auto:` commit.
 
@@ -79,3 +80,5 @@ Note: `AGENT_CMD` is split on whitespace, so it can't contain quoted arguments. 
 ## Security
 
 `/api/chat` requires `Authorization: Bearer <token>`. The token comes from `BRAIN_TOKEN`, else is generated once into `$VAULT_DIR/.git/brain-token` (mode 600, never committed). Anyone with the token can read and write the vault and run the agent, so treat the `?token=` URL like a password. To rotate it, delete the file and restart.
+
+See [BACKLOG.md](BACKLOG.md) for what's next.

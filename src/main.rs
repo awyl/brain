@@ -42,10 +42,11 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("notes/.gitkeep", ""),
 ];
 
-const WEB: &[(&str, &str, &str)] = &[
-    ("/", "text/html; charset=utf-8", include_str!("../web/index.html")),
-    ("/manifest.webmanifest", "application/manifest+json", include_str!("../web/manifest.webmanifest")),
-    ("/icon.svg", "image/svg+xml", include_str!("../web/icon.svg")),
+const WEB: &[(&str, &str, &[u8])] = &[
+    ("/", "text/html; charset=utf-8", include_bytes!("../web/index.html")),
+    ("/manifest.webmanifest", "application/manifest+json", include_bytes!("../web/manifest.webmanifest")),
+    ("/icon.svg", "image/svg+xml", include_bytes!("../web/icon.svg")),
+    ("/apple-touch-icon.png", "image/png", include_bytes!("../web/apple-touch-icon.png")),
 ];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -273,7 +274,7 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
         (Method::Get, path) => {
             eprintln!("GET {path}{}", if req.url().contains("token=") { " (with ?token=)" } else { "" });
             match WEB.iter().find(|(p, ..)| *p == path || (*p == "/" && path == "/index.html")) {
-                Some((_, mime, body)) => req.respond(Response::from_string(*body).with_header(ctype(mime)))?,
+                Some((_, mime, body)) => req.respond(Response::from_data(*body).with_header(ctype(mime)))?,
                 None => req.respond(Response::empty(404))?,
             }
         }

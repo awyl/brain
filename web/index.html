@@ -7,6 +7,7 @@
 <meta name="theme-color" content="#f6f5f2">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Brain</title>
 <style>
   :root { --bg:#f6f5f2; --fg:#1d1d1b; --muted:#8a8780; --me:#dfe8f5; --bot:#fff; --line:#e3e1dc; color-scheme:light; }
@@ -29,11 +30,13 @@
              background:var(--bot); color:var(--fg); max-height:40vh; }
   button { font:inherit; padding:0 16px; border:0; border-radius:12px; background:var(--fg); color:var(--bg); }
   button:disabled { opacity:.4; }
+  button.secondary { padding:0 12px; background:transparent; color:var(--muted); border:1px solid var(--line); }
 </style>
 </head>
 <body>
 <div id="log"><p class="hint">Ask or tell anything. Start with <b>+</b> to dump straight to the inbox.</p></div>
 <form id="f">
+  <button type="button" id="n" class="secondary" title="Start a new chat (clears context)">New</button>
   <textarea id="t" rows="1" placeholder="Message" autofocus></textarea>
   <button id="b">Send</button>
 </form>
@@ -46,12 +49,21 @@ const store = { get: () => { try { return localStorage.getItem('token') || memTo
                 set: v => { memToken = v; try { localStorage.setItem('token', v); } catch {} } };
 const urlToken = new URLSearchParams(location.search).get('token');
 if (urlToken) { store.set(urlToken); history.replaceState(null, '', location.pathname); }
-// Recent turns, sent with each message so follow-up questions have context.
-const turns = [];
+// Chat log, kept on this device across reloads. The last 6 non-capture turns go with each message as context.
+let chat = [];
+try { chat = JSON.parse(localStorage.getItem('chat') || '[]'); } catch {}
+const save = () => { try { localStorage.setItem('chat', JSON.stringify(chat.slice(-100))); } catch {} };
+const turns = () => chat.filter(m => !m.capture).slice(-6).map(({ role, text }) => ({ role, text }));
+for (const m of chat) add(m.text, m.role === 'user' ? 'me' : 'bot');
+document.getElementById('n').addEventListener('click', () => {
+  chat = []; save();
+  log.querySelectorAll('.msg').forEach(m => m.remove());
+  t.focus();
+});
 async function send(message) {
   const post = () => fetch('api/chat', { method:'POST',
     headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + store.get() },
-    body:JSON.stringify({ message, history: turns.slice(-6) }) });
+    body:JSON.stringify({ message, history: turns() }) });
   let r = await post();
   if (r.status === 401) {
     const tok = prompt('Access token (printed by brain serve):');
@@ -97,7 +109,8 @@ document.getElementById('f').addEventListener('submit', async e => {
     }
     if (reply === null) throw new Error('Connection closed before the reply finished.');
     text.className = ''; text.textContent = reply;
-    if (!message.startsWith('+')) turns.push({ role:'user', text:message }, { role:'assistant', text:reply });
+    const capture = message.startsWith('+');
+    chat.push({ role:'user', text:message, capture }, { role:'assistant', text:reply, capture }); save();
   } catch (err) {
     text.className = ''; text.textContent = err.message;
   }
