@@ -119,4 +119,4 @@ Note: `AGENT_CMD` is split on whitespace, so it can't contain quoted arguments. 
 
 `/api/chat` requires `Authorization: Bearer <token>`. The token comes from `BRAIN_TOKEN`, else is generated once into `$VAULT_DIR/.git/brain-token` (mode 600, never committed). Anyone with the token can read and write the vault and run the agent, so treat the `?token=` URL like a password. To rotate it, delete the file and restart.
 
-See [BACKLOG.md](BACKLOG.md) for what's next.
+See [VISION.md](VISION.md) for the goal and principles, and [BACKLOG.md](BACKLOG.md) for what's next.
