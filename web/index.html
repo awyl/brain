@@ -20,6 +20,9 @@
   .msg { max-width:85%; margin:6px 0; padding:8px 12px; border-radius:14px; white-space:pre-wrap; word-wrap:break-word; }
   .me { margin-left:auto; background:var(--me); }
   .bot { background:var(--bot); border:1px solid var(--line); }
+  .steps { color:var(--muted); font-size:13px; }
+  .steps:empty { display:none; }
+  .live { color:var(--muted); }
   .hint { color:var(--muted); font-size:13px; text-align:center; margin:8px 0 16px; }
   form { display:flex; gap:8px; padding:8px 16px calc(env(safe-area-inset-bottom) + 8px); border-top:1px solid var(--line); }
   textarea { flex:1; resize:none; font:inherit; padding:8px 12px; border-radius:12px; border:1px solid var(--line);
@@ -43,10 +46,12 @@ const store = { get: () => { try { return localStorage.getItem('token') || memTo
                 set: v => { memToken = v; try { localStorage.setItem('token', v); } catch {} } };
 const urlToken = new URLSearchParams(location.search).get('token');
 if (urlToken) { store.set(urlToken); history.replaceState(null, '', location.pathname); }
+// Recent turns, sent with each message so follow-up questions have context.
+const turns = [];
 async function send(message) {
   const post = () => fetch('api/chat', { method:'POST',
     headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + store.get() },
-    body:JSON.stringify({message}) });
+    body:JSON.stringify({ message, history: turns.slice(-6) }) });
   let r = await post();
   if (r.status === 401) {
     const tok = prompt('Access token (printed by brain serve):');
@@ -66,12 +71,35 @@ document.getElementById('f').addEventListener('submit', async e => {
   const message = t.value.trim();
   if (!message) return;
   add(message, 'me'); t.value = ''; b.disabled = true;
-  const pending = add('…', 'bot');
+  const pending = add('', 'bot');
+  const steps = pending.appendChild(document.createElement('div')); steps.className = 'steps';
+  const text = pending.appendChild(document.createElement('div')); text.className = 'live'; text.textContent = '…';
   try {
     const r = await send(message);
-    pending.textContent = r.ok ? (await r.json()).reply : r.status === 401 ? 'Unauthorized: wrong or missing token.' : `Error ${r.status}`;
+    if (!r.ok) throw new Error(r.status === 401 ? 'Unauthorized: wrong or missing token.' : `Error ${r.status}`);
+    // Server-sent events: delta (live text), status (tool step), done (final reply).
+    const reader = r.body.getReader(), dec = new TextDecoder();
+    let buf = '', live = '', reply = null;
+    while (reply === null) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const line = buf.slice(0, i); buf = buf.slice(i + 2);
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        if (ev.type === 'delta') { live += ev.text; text.textContent = live; }
+        else if (ev.type === 'status') { steps.textContent += (steps.textContent ? '\n' : '') + '› ' + ev.text; }
+        else if (ev.type === 'done') reply = ev.reply;
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+    if (reply === null) throw new Error('Connection closed before the reply finished.');
+    text.className = ''; text.textContent = reply;
+    if (!message.startsWith('+')) turns.push({ role:'user', text:message }, { role:'assistant', text:reply });
   } catch (err) {
-    pending.textContent = 'Network error: ' + err.message;
+    text.className = ''; text.textContent = err.message;
   }
   b.disabled = false; log.scrollTop = log.scrollHeight;
 });

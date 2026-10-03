@@ -41,24 +41,38 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
    `TUNNEL_TOKEN` switches `brain tunnel` to named mode. `TUNNEL_HOSTNAME` is only used to print the URL. Keep both in `.env`, which is gitignored.
 - The server needs `git` and the agent CLI on `PATH`.
 
-Optional nightly inbox tidy (crontab):
+### Options (env)
 
-```
-0 3 * * * VAULT_DIR=$HOME/brain /usr/local/bin/brain ask "Run the Tidy workflow in AGENTS.md." >> $HOME/brain-tidy.log 2>&1
-```
+| Var | Effect |
+|---|---|
+| `VAULT_DIR` | Vault path (required). |
+| `HOST` / `PORT` | Bind address, default `127.0.0.1:8787`. |
+| `BRAIN_TOKEN` | Access token; default is generated into `$VAULT_DIR/.git/brain-token`. |
+| `BRAIN_PUSH` | Git remote to push the vault to after every change, e.g. `origin`. Failures are logged, never fatal. |
+| `TIDY_AT` | `HH:MM` local time to run the Tidy workflow daily (`serve`/`tunnel`). Skipped when the inbox is empty. |
+| `AGENT_CMD` / `AGENT_FORMAT` | Agent CLI and how its output is read, see below. |
+| `TUNNEL_TOKEN` / `TUNNEL_HOSTNAME` | Named tunnel, see below. |
+
+Backup setup, once: create a private repo, then `git -C ~/brain remote add origin <url>` and set `BRAIN_PUSH=origin`.
 
 ## Using it
 
 - `+ anything`: saved raw to `inbox/` instantly, with no LLM call.
 - `remember I prefer window seats`: the agent files it and commits.
 - `what coffee do I like?`: the agent searches the vault and answers with a source link.
+- `tidy the inbox`: runs the Tidy workflow now.
+
+Replies stream in live: tool steps (`› Edit me/favorites.md`) and text as they happen, then the final answer.
+The page sends the last 6 turns along with each message, so follow-ups ("and what about…") work. The history resets when the page reloads.
 
 Requests run one at a time per vault, via a lock in `.git/brain.lock` that `serve` and cron `ask` share. Anything the agent leaves uncommitted gets an `auto:` commit.
 
 ## Swapping the LLM
 
 Set `AGENT_CMD` to any agent CLI that reads the prompt from stdin and works in the current directory.
-The default is Claude Code, isolated from the host user's settings, hooks and MCP servers (see `DEFAULT_AGENT_CMD` in `src/main.rs`).
+Its stdout is streamed to the page line by line, and the whole output is the reply.
+The default is Claude Code, isolated from the host user's settings, hooks and MCP servers, with `stream-json` output that `brain` parses (see `DEFAULT_AGENT_CMD` in `src/main.rs`).
+`AGENT_FORMAT=claude|text` overrides how output is read; it defaults to `claude` only when `AGENT_CMD` is unset.
 The rules live in the vault's `AGENTS.md`, which any agent can read. For tools that look for a different rules file, add a pointer to `AGENTS.md`, the way `CLAUDE.md` does.
 Note: `AGENT_CMD` is split on whitespace, so it can't contain quoted arguments. Wrap complex commands in a script.
 

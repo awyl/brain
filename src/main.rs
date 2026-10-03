@@ -6,7 +6,9 @@
 //!                      named tunnel if TUNNEL_TOKEN is set (TUNNEL_HOSTNAME for the printed URL), else a quick tunnel
 //!   brain ask <msg>    run the agent once (for cron), print the reply
 //!
-//! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault.
+//! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault. Its stdout is streamed to
+//! the page: parsed as Claude stream-json (AGENT_FORMAT=claude, the default when AGENT_CMD is unset) or as plain text.
+//! BRAIN_PUSH=<remote> pushes the vault after every change. TIDY_AT=HH:MM runs the Tidy workflow daily (serve/tunnel).
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
 
 use std::fs::{self, File};
@@ -15,11 +17,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, thread};
 
+use serde_json::{Value, json};
 use tiny_http::{Header, Method, Response, Server};
 
 // Isolated from the host user's Claude settings, hooks and MCP servers; only the vault's own config applies.
 const DEFAULT_AGENT_CMD: &str = "claude -p --setting-sources project --strict-mcp-config \
-    --permission-mode acceptEdits --allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*)";
+    --permission-mode acceptEdits --allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*) \
+    --output-format stream-json --verbose --include-partial-messages";
+
+const TIDY_PROMPT: &str = "Run the Tidy workflow in AGENTS.md.";
+/// Follow-up context: how many recent turns the page may send, and how much of each is kept.
+const HISTORY_TURNS: usize = 6;
+const HISTORY_CHARS: usize = 1500;
 
 const TEMPLATE: &[(&str, &str)] = &[
     ("AGENTS.md", include_str!("../template/AGENTS.md")),
@@ -47,7 +56,7 @@ fn main() {
         ["init", dir] => init(Path::new(dir)),
         ["serve"] => serve(),
         ["tunnel"] => tunnel(),
-        ["ask", msg] => ask(&vault_dir(), msg).map(|r| println!("{r}")),
+        ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
         _ => Err("usage: brain init <dir> | brain serve | brain tunnel | brain ask <message>".into()),
     };
     if let Err(e) = res {
@@ -84,13 +93,19 @@ struct Config {
     host: String,
     port: String,
     token: String,
+    tidy_at: Option<chrono::NaiveTime>,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
         let vault = vault_dir();
         let token = token(&vault)?;
+        let tidy_at = match env::var("TIDY_AT") {
+            Ok(t) => Some(chrono::NaiveTime::parse_from_str(&t, "%H:%M").map_err(|_| format!("TIDY_AT must be HH:MM, got {t:?}"))?),
+            Err(_) => None,
+        };
         Ok(Config {
+            tidy_at,
             host: env::var("HOST").unwrap_or_else(|_| "127.0.0.1".into()),
             port: env::var("PORT").unwrap_or_else(|_| "8787".into()),
             vault,
@@ -130,6 +145,11 @@ fn bind(cfg: &Config) -> Result<Server> {
 }
 
 fn run(server: Server, cfg: Config) {
+    if let Some(at) = cfg.tidy_at {
+        let vault = cfg.vault.clone();
+        println!("tidy scheduled daily at {at}");
+        thread::spawn(move || tidy_daily(&vault, at));
+    }
     let cfg = std::sync::Arc::new(cfg);
     for req in server.incoming_requests() {
         let cfg = cfg.clone();
@@ -139,6 +159,30 @@ fn run(server: Server, cfg: Config) {
                 eprintln!("request error: {e}");
             }
         });
+    }
+}
+
+fn tidy_daily(vault: &Path, at: chrono::NaiveTime) {
+    loop {
+        let now = chrono::Local::now().naive_local();
+        let mut next = now.date().and_time(at);
+        if next <= now {
+            next += chrono::Duration::days(1);
+        }
+        thread::sleep((next - now).to_std().unwrap_or_default());
+        // Skip the LLM call when there's nothing to sort.
+        let pending = fs::read_dir(vault.join("inbox"))
+            .map(|d| d.flatten().filter(|e| e.file_name() != ".gitkeep").count())
+            .unwrap_or(0);
+        if pending == 0 {
+            eprintln!("tidy: inbox empty, skipped");
+            continue;
+        }
+        eprintln!("tidy: {pending} inbox item(s)");
+        match ask(vault, TIDY_PROMPT, &mut |_| {}) {
+            Ok(reply) => eprintln!("tidy: done\n{reply}"),
+            Err(e) => eprintln!("tidy: error: {e}"),
+        }
     }
 }
 
@@ -245,19 +289,31 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
             }
             let mut body = String::new();
             req.as_reader().read_to_string(&mut body)?;
-            let msg: serde_json::Value = serde_json::from_str(&body)?;
-            let msg = msg["message"].as_str().unwrap_or("").trim();
+            let body: Value = serde_json::from_str(&body)?;
+            let msg = body["message"].as_str().unwrap_or("").trim().to_string();
             if msg.is_empty() {
                 return Ok(req.respond(Response::empty(400))?);
             }
+            eprintln!("POST /api/chat 200");
+            // Server-sent events over a hand-written chunked response, flushed per event so
+            // progress reaches the phone live. Write errors (phone gone) are ignored: the agent finishes anyway.
+            let mut w = req.into_writer();
+            w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\
+                Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n")?;
+            let mut send = |ev: Value| {
+                let data = format!("data: {ev}\n\n");
+                let _ = write!(w, "{:x}\r\n{data}\r\n", data.len()).and_then(|_| w.flush());
+            };
             let reply = match msg.strip_prefix('+') {
                 Some(text) => capture(&cfg.vault, text.trim()),
-                None => ask(&cfg.vault, msg),
+                None => ask(&cfg.vault, &with_history(&msg, &body["history"]), &mut |ev| send(match ev {
+                    Event::Delta(t) => json!({ "type": "delta", "text": t }),
+                    Event::Status(t) => json!({ "type": "status", "text": t }),
+                })),
             }
             .unwrap_or_else(|e| format!("Error: {e}"));
-            eprintln!("POST /api/chat 200");
-            let json = serde_json::json!({ "reply": reply }).to_string();
-            req.respond(Response::from_string(json).with_header(ctype("application/json")))?
+            send(json!({ "type": "done", "reply": reply }));
+            let _ = w.write_all(b"0\r\n\r\n").and_then(|_| w.flush());
         }
         _ => req.respond(Response::empty(404))?,
     }
@@ -295,12 +351,42 @@ fn capture(vault: &Path, text: &str) -> Result<String> {
     fs::write(vault.join("inbox").join(&name), format!("{text}\n"))?;
     git(vault, &["add", &format!("inbox/{name}")])?;
     git(vault, &["commit", "-qm", &format!("inbox: {slug}")])?;
+    push(vault);
     Ok(format!("Saved to inbox/{name}"))
 }
 
-/// Run AGENT_CMD in the vault with the prompt on stdin, then commit anything it left behind.
-fn ask(vault: &Path, prompt: &str) -> Result<String> {
-    let cmd = env::var("AGENT_CMD").unwrap_or_else(|_| DEFAULT_AGENT_CMD.into());
+/// Progress from a running agent.
+enum Event {
+    /// A piece of reply text.
+    Delta(String),
+    /// A tool step, e.g. "Edit me/favorites.md".
+    Status(String),
+}
+
+/// Prefix the message with recent turns from the page, so follow-ups ("and what about…") work with any agent.
+fn with_history(msg: &str, history: &Value) -> String {
+    let turns = history.as_array().map(Vec::as_slice).unwrap_or_default();
+    let turns = &turns[turns.len().saturating_sub(HISTORY_TURNS)..];
+    if turns.is_empty() {
+        return msg.to_string();
+    }
+    let mut p = String::from("Recent conversation, for context only:\n");
+    for t in turns {
+        let who = if t["role"] == "assistant" { "Assistant" } else { "User" };
+        let text: String = t["text"].as_str().unwrap_or("").chars().take(HISTORY_CHARS).collect();
+        p += &format!("{who}: {text}\n");
+    }
+    p + "\nCurrent message:\n" + msg
+}
+
+/// Run AGENT_CMD in the vault with the prompt on stdin, stream its progress, then commit and push.
+fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> {
+    let custom = env::var("AGENT_CMD").ok();
+    let claude = match env::var("AGENT_FORMAT") {
+        Ok(f) => f == "claude",
+        Err(_) => custom.is_none(),
+    };
+    let cmd = custom.unwrap_or_else(|| DEFAULT_AGENT_CMD.into());
     let mut parts = cmd.split_whitespace();
     let program = parts.next().ok_or("AGENT_CMD is empty")?;
 
@@ -313,18 +399,79 @@ fn ask(vault: &Path, prompt: &str) -> Result<String> {
         .stderr(Stdio::piped())
         .spawn()?;
     child.stdin.take().unwrap().write_all(prompt.as_bytes())?;
-    let out = child.wait_with_output()?;
+    let stderr = child.stderr.take().unwrap();
+    let stderr = thread::spawn(move || {
+        let mut s = String::new();
+        let _ = BufReader::new(stderr).read_to_string(&mut s);
+        s
+    });
+
+    let mut reply = String::new();
+    let mut said_something = false;
+    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line?;
+        if !claude {
+            on(Event::Delta(format!("{line}\n")));
+            reply += &line;
+            reply.push('\n');
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        match v["type"].as_str() {
+            Some("stream_event") => match v["event"]["type"].as_str() {
+                Some("message_start") if said_something => on(Event::Delta("\n\n".into())),
+                Some("content_block_delta") if v["event"]["delta"]["type"] == "text_delta" => {
+                    said_something = true;
+                    on(Event::Delta(v["event"]["delta"]["text"].as_str().unwrap_or("").into()));
+                }
+                _ => {}
+            },
+            Some("assistant") => {
+                for c in v["message"]["content"].as_array().into_iter().flatten().filter(|c| c["type"] == "tool_use") {
+                    on(Event::Status(tool_summary(c, vault)));
+                }
+            }
+            Some("result") => reply = v["result"].as_str().unwrap_or("").to_string(),
+            _ => {}
+        }
+    }
+    let status = child.wait()?;
+    let stderr = stderr.join().unwrap_or_default();
 
     // Safety net: never leave agent edits uncommitted.
     git(vault, &["add", "-A"])?;
     if !Command::new("git").args(["diff", "--cached", "--quiet"]).current_dir(vault).status()?.success() {
         git(vault, &["commit", "-qm", "auto: uncommitted agent changes"])?;
     }
+    push(vault);
 
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    if status.success() {
+        Ok(reply.trim().to_string())
     } else {
-        Ok(format!("Agent failed ({}):\n{}", out.status, String::from_utf8_lossy(&out.stderr).trim()))
+        Ok(format!("Agent failed ({status}):\n{}", stderr.trim()))
+    }
+}
+
+/// "Edit me/favorites.md", "Bash git commit -m …": tool name plus its most telling argument.
+fn tool_summary(tool: &Value, vault: &Path) -> String {
+    let input = &tool["input"];
+    let arg = ["file_path", "command", "pattern", "path"].iter().find_map(|k| input[k].as_str()).unwrap_or("");
+    let prefix = format!("{}/", vault.display());
+    let arg = arg.strip_prefix(&prefix).unwrap_or(arg).lines().next().unwrap_or("");
+    let arg: String = arg.chars().take(80).collect();
+    format!("{} {arg}", tool["name"].as_str().unwrap_or("tool")).trim_end().to_string()
+}
+
+/// BRAIN_PUSH=<remote>: back up the vault after every change. Failure is logged, never fatal.
+fn push(vault: &Path) {
+    let Ok(remote) = env::var("BRAIN_PUSH") else { return };
+    let ok = Command::new("git")
+        .args(["push", "-q", &remote, "HEAD"])
+        .current_dir(vault)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("push to {remote} failed");
     }
 }
 
