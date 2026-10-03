@@ -38,7 +38,7 @@ Replies are usually read on a phone: keep them short, plain text, no preamble.
 4. Commit.
 
 ### Query — "what's my …", "did I …", "find …"
-1. Search the vault first (`grep -ri`, filenames, tags, links). Never answer personal facts from memory or guesswork.
+1. Search the vault first (file contents, filenames, tags, links). Never answer personal facts from memory or guesswork.
 2. Answer briefly and cite the source note(s) as `[[note-name]]`.
 3. If nothing is found, say so and offer to capture it.
 
@@ -52,5 +52,5 @@ Then commit and report: what went where, what was left.
 
 ## Git
 
-- Commit after every change set: `git add -A && git commit -m "<verb>: <what>"`, e.g. `capture: coffee preference`, `tidy: 4 inbox items`.
+- Commit after every change set with `git add -A` then `git commit -m "<verb>: <what>"`, e.g. `capture: coffee preference`, `tidy: 4 inbox items`.
 - Never rewrite history or force-push.
