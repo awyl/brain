@@ -37,8 +37,10 @@
 <script>
 const log = document.getElementById('log'), t = document.getElementById('t'), b = document.getElementById('b');
 // Token: from ?token= once (then hidden from the URL), remembered on this device.
-const store = { get: () => { try { return localStorage.getItem('token') || ''; } catch { return ''; } },
-                set: v => { try { localStorage.setItem('token', v); } catch {} } };
+// Kept in memory too, so it still works when storage is blocked (private tab, in-app browser).
+let memToken = '';
+const store = { get: () => { try { return localStorage.getItem('token') || memToken; } catch { return memToken; } },
+                set: v => { memToken = v; try { localStorage.setItem('token', v); } catch {} } };
 const urlToken = new URLSearchParams(location.search).get('token');
 if (urlToken) { store.set(urlToken); history.replaceState(null, '', location.pathname); }
 async function send(message) {
