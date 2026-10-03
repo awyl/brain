@@ -5,11 +5,15 @@
 //!   brain tunnel       serve + a public Cloudflare tunnel (downloads cloudflared if needed):
 //!                      named tunnel if TUNNEL_TOKEN is set (TUNNEL_HOSTNAME for the printed URL), else a quick tunnel
 //!   brain ask <msg>    run the agent once (for cron), print the reply
+//!   brain lint         check vault structure against _templates/ and _meta/tags.md (no LLM)
+//!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
 //! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault. Its stdout is streamed to
 //! the page: parsed as Claude stream-json (AGENT_FORMAT=claude, the default when AGENT_CMD is unset) or as plain text.
 //! BRAIN_PUSH=<remote> pushes the vault after every change. TIDY_AT=HH:MM runs the Tidy workflow daily (serve/tunnel).
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
+
+mod lint;
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -38,9 +42,20 @@ const TEMPLATE: &[(&str, &str)] = &[
     ("me/preferences.md", include_str!("../template/me/preferences.md")),
     ("me/favorites.md", include_str!("../template/me/favorites.md")),
     ("me/interests.md", include_str!("../template/me/interests.md")),
+    ("_templates/place.md", include_str!("../template/_templates/place.md")),
+    ("_templates/media.md", include_str!("../template/_templates/media.md")),
+    ("_templates/product.md", include_str!("../template/_templates/product.md")),
+    ("_templates/person.md", include_str!("../template/_templates/person.md")),
+    ("_templates/recipe.md", include_str!("../template/_templates/recipe.md")),
+    ("_templates/topic.md", include_str!("../template/_templates/topic.md")),
+    ("_meta/tags.md", include_str!("../template/_meta/tags.md")),
+    ("_meta/rules.md", include_str!("../template/_meta/rules.md")),
     ("inbox/.gitkeep", ""),
     ("notes/.gitkeep", ""),
 ];
+
+/// Template files owned by brain: `brain upgrade` overwrites them. Everything else is only added if missing.
+const MANAGED: &[&str] = &["AGENTS.md", "CLAUDE.md", ".claude/commands/tidy.md"];
 
 const WEB: &[(&str, &str, &[u8])] = &[
     ("/", "text/html; charset=utf-8", include_bytes!("../web/index.html")),
@@ -58,7 +73,9 @@ fn main() {
         ["serve"] => serve(),
         ["tunnel"] => tunnel(),
         ["ask", msg] => ask(&vault_dir(), msg, &mut |_| {}).map(|r| println!("{r}")),
-        _ => Err("usage: brain init <dir> | brain serve | brain tunnel | brain ask <message>".into()),
+        ["lint"] => lint_cmd(&vault_dir()),
+        ["upgrade"] => upgrade(&vault_dir()),
+        _ => Err("usage: brain init <dir> | serve | tunnel | ask <message> | lint | upgrade".into()),
     };
     if let Err(e) = res {
         eprintln!("error: {e}");
@@ -86,6 +103,45 @@ fn init(dir: &Path) -> Result<()> {
     git(dir, &["add", "-A"])?;
     git(dir, &["commit", "-qm", "init vault"])?;
     println!("vault created at {}", dir.display());
+    Ok(())
+}
+
+fn lint_cmd(vault: &Path) -> Result<()> {
+    let issues = lint::Vault::load(vault).check_all();
+    for i in &issues {
+        println!("{i}");
+    }
+    match issues.iter().filter(|i| !i.warn).count() {
+        0 => Ok(()),
+        n => Err(format!("{n} problem(s)").into()),
+    }
+}
+
+fn upgrade(vault: &Path) -> Result<()> {
+    let _lock = lock(vault)?;
+    let mut written = vec![];
+    for (rel, content) in TEMPLATE {
+        let path = vault.join(rel);
+        let current = fs::read_to_string(&path).ok();
+        let action = match current {
+            None => "added",
+            Some(c) if MANAGED.contains(rel) && c != *content => "updated",
+            _ => continue,
+        };
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(&path, content)?;
+        println!("{action} {rel}");
+        written.push(*rel);
+    }
+    if written.is_empty() {
+        println!("already up to date");
+        return Ok(());
+    }
+    // Only what upgrade wrote: the owner's own uncommitted edits stay out of this commit.
+    git(vault, &[&["add", "--"], written.as_slice()].concat())?;
+    git(vault, &[&["commit", "-qm", "upgrade: vault template", "--"], written.as_slice()].concat())?;
+    push(vault);
+    println!("committed. To convert existing notes, send: restructure the vault");
     Ok(())
 }
 
@@ -380,8 +436,55 @@ fn with_history(msg: &str, history: &Value) -> String {
     p + "\nCurrent message:\n" + msg
 }
 
-/// Run AGENT_CMD in the vault with the prompt on stdin, stream its progress, then commit and push.
+/// Run the agent, check what it changed, give it one round to fix problems, then commit and push.
 fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> {
+    let _lock = lock(vault)?;
+    let before = git_out(vault, &["rev-parse", "HEAD"])?;
+    let mut reply = match run_agent(vault, prompt, on) {
+        Ok(r) => r,
+        Err(e) => e.to_string(),
+    };
+
+    let problems = check_changed(vault, &before)?;
+    if !problems.is_empty() {
+        on(Event::Status(format!("lint: {} problem(s), fixing", problems.len())));
+        let fix = format!(
+            "The vault checker found problems in files you just changed. Fix exactly these per AGENTS.md, then commit. \
+             Reply in one line.\n\n{}",
+            problems.join("\n")
+        );
+        // Only tool steps from the fix round reach the page; the user's reply stays the original one.
+        if let Err(e) = run_agent(vault, &fix, &mut |ev| if let Event::Status(_) = ev { on(ev) }) {
+            eprintln!("lint fix round failed: {e}");
+        }
+        let left = check_changed(vault, &before)?;
+        if !left.is_empty() {
+            reply += &format!("\n\n⚠ {} structure problem(s) left:\n{}", left.len(), left.join("\n"));
+        }
+    }
+
+    // Safety net: never leave agent edits uncommitted.
+    git(vault, &["add", "-A"])?;
+    if !Command::new("git").args(["diff", "--cached", "--quiet"]).current_dir(vault).status()?.success() {
+        git(vault, &["commit", "-qm", "auto: uncommitted agent changes"])?;
+    }
+    push(vault);
+    Ok(reply)
+}
+
+/// Lint errors (not warnings) in notes changed since `before`: committed, staged, unstaged or new.
+fn check_changed(vault: &Path, before: &str) -> Result<Vec<String>> {
+    let changed = git_out(vault, &["diff", "--name-only", before])?;
+    let new = git_out(vault, &["ls-files", "--others", "--exclude-standard"])?;
+    let lint = lint::Vault::load(vault);
+    let paths: Vec<String> = changed.lines().chain(new.lines()).map(str::to_string).collect();
+    // New or changed notes must be linked from somewhere; old orphans elsewhere don't block.
+    let issues = paths.iter().flat_map(|p| lint.check(p)).chain(lint.orphans(&paths, false));
+    Ok(issues.filter(|i| !i.warn).map(|i| i.to_string()).collect())
+}
+
+/// Run AGENT_CMD in the vault with the prompt on stdin and stream its progress. Caller holds the lock.
+fn run_agent(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> {
     let custom = env::var("AGENT_CMD").ok();
     let claude = match env::var("AGENT_FORMAT") {
         Ok(f) => f == "claude",
@@ -391,7 +494,6 @@ fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> 
     let mut parts = cmd.split_whitespace();
     let program = parts.next().ok_or("AGENT_CMD is empty")?;
 
-    let _lock = lock(vault)?;
     let mut child = Command::new(program)
         .args(parts)
         .current_dir(vault)
@@ -438,18 +540,10 @@ fn ask(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> 
     }
     let status = child.wait()?;
     let stderr = stderr.join().unwrap_or_default();
-
-    // Safety net: never leave agent edits uncommitted.
-    git(vault, &["add", "-A"])?;
-    if !Command::new("git").args(["diff", "--cached", "--quiet"]).current_dir(vault).status()?.success() {
-        git(vault, &["commit", "-qm", "auto: uncommitted agent changes"])?;
-    }
-    push(vault);
-
     if status.success() {
         Ok(reply.trim().to_string())
     } else {
-        Ok(format!("Agent failed ({status}):\n{}", stderr.trim()))
+        Err(format!("Agent failed ({status}):\n{}", stderr.trim()).into())
     }
 }
 
@@ -474,6 +568,14 @@ fn push(vault: &Path) {
     if !ok {
         eprintln!("push to {remote} failed");
     }
+}
+
+fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git").args(args).current_dir(dir).output()?;
+    if !out.status.success() {
+        return Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()).into());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn git(dir: &Path, args: &[&str]) -> io::Result<()> {

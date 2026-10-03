@@ -11,9 +11,10 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 
 | Path | What |
 |---|---|
-| `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`. |
+| `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`, `lint`, `upgrade`. |
+| `src/lint.rs` | Vault structure checks (no LLM). |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
-| `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules. |
+| `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
 
 ## Setup
 
@@ -67,6 +68,21 @@ Replies stream in live: tool steps (`› Edit me/favorites.md`) and text as they
 The page sends the last 6 turns along with each message, so follow-ups ("and what about…") work. The chat survives reloads; tap **New** to start fresh.
 
 Requests run one at a time per vault, via a lock in `.git/brain.lock` that `serve` and cron `ask` share. Anything the agent leaves uncommitted gets an `auto:` commit.
+
+## Vault structure
+
+```
+inbox/  me/  notes/  _templates/  _meta/tags.md  _meta/rules.md
+```
+
+- Every note in `notes/` has a `type` (`place`, `media`, `product`, `person`, `recipe`, `topic`). Its frontmatter fields come from `_templates/<type>.md`; a `# a | b` comment there lists the allowed values.
+- Tags must be listed in `_meta/tags.md`. Facts are dated bullets (`- 2026-10-03 · …`). `me/*.md` are hubs linking to notes.
+- The vault is its own schema: edit `_templates/` and `_meta/tags.md` to add types, fields or tags. Put your own agent rules in `_meta/rules.md`.
+
+`brain lint` checks every note against that schema: fields, allowed values, tags, `[[links]]`, filenames, and orphan notes (warnings). It exits 1 on errors.
+After each agent run, `brain` checks the notes that run changed. On problems, the agent gets one round to fix them; anything left is listed under the reply.
+
+`brain upgrade` updates an existing vault from the binary's template. It overwrites `AGENTS.md`, `CLAUDE.md` and `.claude/commands/tidy.md`, adds missing files, and never touches anything else. Then send `restructure the vault` to convert old notes.
 
 ## Swapping the LLM
 
