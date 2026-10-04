@@ -409,14 +409,30 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
                 None => req.respond(Response::empty(404))?,
             }
         }
+        (Method::Post, "/api/capture") => {
+            // For iOS Shortcuts / scripts: one-shot inbox capture, plain JSON reply (no event stream, no LLM).
+            if !authorized(&req, cfg, "/api/capture") {
+                return Ok(req.respond(Response::empty(401))?);
+            }
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body)?;
+            // JSON {"text": …}, or the raw body as text.
+            let text = match serde_json::from_str::<Value>(&body) {
+                Ok(v) => v["text"].as_str().unwrap_or("").to_string(),
+                Err(_) => body,
+            };
+            let (status, reply) = match text.trim() {
+                "" => (400, json!({ "error": "empty text" })),
+                t => match capture(&cfg.vault, t) {
+                    Ok(saved) => (200, json!({ "reply": saved })),
+                    Err(e) => (500, json!({ "error": e.to_string() })),
+                },
+            };
+            eprintln!("POST /api/capture {status}");
+            req.respond(Response::from_string(reply.to_string()).with_status_code(status).with_header(ctype("application/json")))?
+        }
         (Method::Post, "/api/chat") => {
-            let auth = req.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str());
-            if !auth.and_then(|a| a.strip_prefix("Bearer ")).is_some_and(|t| same(t, &cfg.token)) {
-                let why = match auth {
-                    None => "no Authorization header".to_string(),
-                    Some(a) => format!("wrong token (got {} chars, want Bearer + {})", a.len(), cfg.token.len()),
-                };
-                eprintln!("POST /api/chat 401: {why}");
+            if !authorized(&req, cfg, "/api/chat") {
                 return Ok(req.respond(Response::empty(401))?);
             }
             let mut body = String::new();
@@ -451,6 +467,20 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
         _ => req.respond(Response::empty(404))?,
     }
     Ok(())
+}
+
+/// `Authorization: Bearer <token>`; logs why when not (never the token itself).
+fn authorized(req: &tiny_http::Request, cfg: &Config, path: &str) -> bool {
+    let auth = req.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str());
+    if auth.and_then(|a| a.strip_prefix("Bearer ")).is_some_and(|t| same(t, &cfg.token)) {
+        return true;
+    }
+    let why = match auth {
+        None => "no Authorization header".to_string(),
+        Some(a) => format!("wrong token (got {} chars, want Bearer + {})", a.len(), cfg.token.len()),
+    };
+    eprintln!("POST {path} 401: {why}");
+    false
 }
 
 /// Constant-time string comparison for the token.
@@ -657,16 +687,33 @@ fn tool_summary(tool: &Value, vault: &Path) -> String {
 }
 
 /// BRAIN_PUSH=<remote>: back up the vault after every change. Failure is logged, never fatal.
+/// Back up the vault after every change: push to BRAIN_PUSH (default `origin`, else the first remote),
+/// in the background so replies don't wait on the network. No remote: silently skipped. BRAIN_PUSH=0: off.
+/// Failure is logged, never fatal; the next change pushes everything anyway.
 fn push(vault: &Path) {
-    let Ok(remote) = env::var("BRAIN_PUSH") else { return };
-    let ok = Command::new("git")
-        .args(["push", "-q", &remote, "HEAD"])
-        .current_dir(vault)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !ok {
-        eprintln!("push to {remote} failed");
-    }
+    let remotes = git_out(vault, &["remote"]).unwrap_or_default();
+    let remote = match env::var("BRAIN_PUSH") {
+        Ok(r) if r == "0" => return,
+        Ok(r) => r,
+        Err(_) if remotes.lines().any(|r| r == "origin") => "origin".into(),
+        Err(_) => match remotes.lines().next() {
+            Some(r) => r.to_string(),
+            None => return,
+        },
+    };
+    let vault = vault.to_path_buf();
+    thread::spawn(move || {
+        // One push at a time: concurrent pushes of the same branch fail with "cannot lock ref".
+        // Each pushes HEAD as it is when its turn comes, so the last one always catches up.
+        static PUSHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = PUSHING.lock().unwrap_or_else(|e| e.into_inner());
+        let out = Command::new("git").args(["push", "-q", &remote, "HEAD"]).current_dir(&vault).output();
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => eprintln!("push to {remote} failed: {}", String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("")),
+            Err(e) => eprintln!("push to {remote} failed: {e}"),
+        }
+    });
 }
 
 fn git_out(dir: &Path, args: &[&str]) -> Result<String> {

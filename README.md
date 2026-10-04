@@ -53,12 +53,12 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
 | `VAULT_DIR` | Vault path (required). |
 | `HOST` / `PORT` | Bind address, default `127.0.0.1:8787`. |
 | `BRAIN_TOKEN` | Access token; default is generated into `$VAULT_DIR/.git/brain-token`. |
-| `BRAIN_PUSH` | Git remote to push the vault to after every change, e.g. `origin`. Failures are logged, never fatal. |
+| `BRAIN_PUSH` | Backup: after every change the vault is pushed (in the background) to `origin`, or its first remote. No remote: skipped. `BRAIN_PUSH=<remote>` picks one, `BRAIN_PUSH=0` turns it off. Failures are logged, never fatal. |
 | `TIDY_AT` | `HH:MM` local time for the daily job (`serve`/`tunnel`): Tidy if the inbox has items, then Profile if notes changed since the last one. |
 | `AGENT_CMD` / `AGENT_FORMAT` | Agent CLI and how its output is read, see below. |
 | `TUNNEL_TOKEN` / `TUNNEL_HOSTNAME` | Named tunnel, see below. |
 
-Backup setup, once: create a private repo, then `git -C ~/brain remote add origin <url>` and set `BRAIN_PUSH=origin`.
+Backup setup, once: create a **private** repo, then `git -C ~/brain remote add origin <url>`. The server's git needs push access (SSH key or credential helper).
 
 ## Using it
 
@@ -101,6 +101,20 @@ What makes it more than a notebook (see [VISION.md](VISION.md)):
 - **Provenance:** your facts are dated bullets in your words. Anything the LLM writes sits under a `(LLM)` heading or in a generated file.
 
 Fetched pages are untrusted input to an agent that can edit the vault. The output is fenced as data and `AGENTS.md` says to ignore instructions in it, but that's mitigation, not a guarantee. The agent can only edit the vault and run git, so the damage is limited to reversible commits.
+
+## Share sheet (iOS Shortcut)
+
+`POST /api/capture` saves to the inbox in one shot, with no LLM call and a plain JSON reply (`{"reply": "Saved to inbox/…"}`). The body is JSON `{"text": "…"}` or raw text, with `Authorization: Bearer <token>`.
+
+Build the shortcut once in the Shortcuts app:
+1. New shortcut, name it "Save to brain". In its settings, turn on **Show in Share Sheet**, and accept **Text** and **URLs**.
+2. Action **Get Contents of URL**: URL `https://<your host>/api/capture`, Method **POST**.
+   - Headers: `Authorization` = `Bearer <token>`.
+   - Request Body **JSON**, with key `text` = **Shortcut Input**.
+3. Action **Show Notification** with the result (optional).
+
+Then Share → Save to brain from Safari, Photos captions, Notes, or anywhere. It also works from Siri ("Save to brain"), which asks for the text when there's no input.
+The quick-tunnel URL changes on every restart, which breaks the shortcut; a named tunnel gives it a stable URL.
 
 ## Use it from other projects (MCP)
 

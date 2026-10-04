@@ -12,5 +12,5 @@ See [VISION.md](VISION.md) for the goal and principles these serve.
 ## Infra
 
 - [ ] **Run as a service**: systemd unit for `brain tunnel` (restart on failure, `EnvironmentFile=.env`), plus a named tunnel for a stable URL. Today the server only lives as long as whoever started it.
-- [ ] **Turn on backup**: create a private repo, `git -C <vault> remote add origin <url>`, set `BRAIN_PUSH=origin`.
-- [ ] **Share-sheet capture**: iOS Shortcut "Save to brain" that posts `+ <shared text/link>`. Needs a plain JSON endpoint (e.g. `POST /api/capture`), since Shortcuts handles a single JSON reply better than an event stream.
+- [ ] **Turn on backup**: push is on by default now; it only needs a remote. Create a private repo and `git -C <vault> remote add origin <url>`.
+- [x] **Share-sheet capture**: iOS Shortcut "Save to brain" that posts `+ <shared text/link>`. Needs a plain JSON endpoint (e.g. `POST /api/capture`), since Shortcuts handles a single JSON reply better than an event stream.
