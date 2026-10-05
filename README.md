@@ -4,7 +4,8 @@ Chat with an LLM from your phone to capture and query a personal markdown vault 
 This repo builds a single binary, `brain`. The vault is a separate git repo it manages.
 
 ```
-phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► git commit
+phone (PWA) ──► brain serve ──► built-in agent in $VAULT_DIR ──► git commit
+                    │                 └─ LLM + MCP tools via aiproxy
                     │
                     └─ "+ text" ──► inbox/<timestamp>.md (no LLM)
 ```
@@ -15,6 +16,7 @@ phone (PWA) ──► brain serve ──► $AGENT_CMD in $VAULT_DIR ──► g
 | `src/lint.rs` | Vault structure checks (no LLM). |
 | `src/search.rs` | Hybrid search: BM25 full-text + local embeddings. |
 | `src/fetch.rs` | `brain fetch`: web page → plain text, fenced as untrusted. |
+| `src/agent.rs` | The built-in agent: tool loop over the vault, LLM calls through aiproxy. |
 | `src/mcp.rs` | `brain mcp`: MCP server for agents in other projects. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
@@ -44,7 +46,7 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
    TUNNEL_TOKEN=… TUNNEL_HOSTNAME=brain.example.com VAULT_DIR=~/brain brain tunnel
    ```
    `TUNNEL_TOKEN` switches `brain tunnel` to named mode. `TUNNEL_HOSTNAME` is only used to print the URL. Keep both in `.env`, which is gitignored.
-- The server needs `git` and the agent CLI on `PATH`.
+- The server needs `git` on `PATH` and a reachable [aiproxy](https://github.com/awyl/aiproxy), with `BRAIN_MODEL` set (see [The agent](#the-agent)).
 
 ### Options (env)
 
@@ -55,7 +57,10 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
 | `BRAIN_TOKEN` | Access token; default is generated into `$VAULT_DIR/.git/brain-token`. |
 | `BRAIN_PUSH` | Backup: after every change the vault is pushed (in the background) to `origin`, or its first remote. No remote: skipped. `BRAIN_PUSH=<remote>` picks one, `BRAIN_PUSH=0` turns it off. Failures are logged, never fatal. |
 | `TIDY_AT` | `HH:MM` local time for the daily job (`serve`/`tunnel`): Tidy if the inbox has items, then Profile if notes changed since the last one. |
-| `AGENT_CMD` / `AGENT_FORMAT` | Agent CLI and how its output is read, see below. |
+| `BRAIN_MODEL` | LLM model id via aiproxy (required), e.g. `opencode-go/deepseek-v4.1-flash`. |
+| `AIPROXY_URL` / `AIPROXY_TOKEN` | aiproxy address (default `http://127.0.0.1:8080`) and its bearer token. |
+| `BRAIN_MCP` | aiproxy MCP servers the agent may use, comma-separated, e.g. `searxng,ctx7` (sent as `X-MCP-Servers`, so `name:token` works too). Unset: none. |
+| `AGENT_CMD` / `AGENT_FORMAT` | External agent CLI instead of the built-in one, see below. |
 | `TUNNEL_TOKEN` / `TUNNEL_HOSTNAME` | Named tunnel, see below. |
 
 Backup setup, once: create a **private** repo, then `git -C ~/brain remote add origin <url>`. The server's git needs push access (SSH key or credential helper).
@@ -153,12 +158,25 @@ The agent uses `brain search` before creating a note (to avoid duplicates) and t
 
 Small embedding models can't tell "the same book" from "two books on the same topic" by content alone. That's why content duplicates are only flagged for near-copies, and the main defense is searching before creating.
 
-## Swapping the LLM
+## The agent
 
-Set `AGENT_CMD` to any agent CLI that reads the prompt from stdin and works in the current directory.
+The agent is built into `brain` (`src/agent.rs`): a loop that sends the conversation to aiproxy's OpenAI `/v1/chat/completions` and runs the tools the model asks for.
+aiproxy holds the provider keys, so `brain` only needs `AIPROXY_URL`, `AIPROXY_TOKEN` and `BRAIN_MODEL`. The model must be one aiproxy serves on the chat-completions surface; aiproxy passes requests through without converting between formats.
+
+| Tool | What |
+|---|---|
+| `read` / `write` / `edit` | Files inside the vault. Never `.git/`, never `..`. |
+| `run` | An argument list, no shell: `git` (no `config`, no `-c`), `grep` and `ls` (no paths outside the vault), `date`, `brain lint\|search\|tags\|fetch`. |
+| `<server>__<tool>` | aiproxy MCP tools from the servers in `BRAIN_MCP`, e.g. `searxng__search`. If `/mcp` is down, the agent runs without them. |
+
+The system prompt is the vault's `AGENTS.md` plus `_meta/rules.md`. A run stops after 40 rounds.
+
+### External agent CLI
+
+Set `AGENT_CMD` to any agent CLI that reads the prompt from stdin and works in the current directory instead.
 Its stdout is streamed to the page line by line, and the whole output is the reply.
-The default is Claude Code, isolated from the host user's settings, hooks and MCP servers, with `stream-json` output that `brain` parses (see `DEFAULT_AGENT_CMD` in `src/main.rs`).
-`AGENT_FORMAT=claude|text` overrides how output is read; it defaults to `claude` only when `AGENT_CMD` is unset.
+`AGENT_CMD=claude` runs Claude Code, isolated from the host user's settings, hooks and MCP servers, with `stream-json` output that `brain` parses (see `CLAUDE_AGENT_CMD` in `src/main.rs`).
+`AGENT_FORMAT=claude|text` overrides how output is read; it defaults to `claude` only for `AGENT_CMD=claude`.
 The rules live in the vault's `AGENTS.md`, which any agent can read. For tools that look for a different rules file, add a pointer to `AGENTS.md`, the way `CLAUDE.md` does.
 Note: `AGENT_CMD` is split on whitespace, so it can't contain quoted arguments. Wrap complex commands in a script.
 

@@ -12,11 +12,14 @@
 //!   brain lint         check vault structure against _templates/ (no LLM)
 //!   brain upgrade      update an existing vault's managed files from the embedded template
 //!
-//! AGENT_CMD picks the LLM. It gets the prompt on stdin and runs inside the vault. Its stdout is streamed to
-//! the page: parsed as Claude stream-json (AGENT_FORMAT=claude, the default when AGENT_CMD is unset) or as plain text.
+//! The agent is built in (src/agent.rs: a tool loop whose LLM calls go through aiproxy; BRAIN_MODEL required).
+//! AGENT_CMD swaps in an external agent CLI instead: it gets the prompt on stdin and runs inside the vault. Its stdout
+//! is streamed to the page: parsed as Claude stream-json (AGENT_FORMAT=claude, the default for AGENT_CMD=claude) or as
+//! plain text. AGENT_CMD=claude runs Claude Code with the isolated setup in DEFAULT_AGENT_CMD.
 //! BRAIN_PUSH=<remote> pushes the vault after every change. TIDY_AT=HH:MM runs the Tidy workflow daily (serve/tunnel).
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
 
+mod agent;
 mod fetch;
 mod lint;
 mod mcp;
@@ -31,9 +34,9 @@ use std::{env, thread};
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Response, Server};
 
-// Isolated from the host user's Claude settings, hooks and MCP servers; only the vault's own config applies.
-// An argument list, not a string, because `Bash(brain lint:*)` contains a space.
-const DEFAULT_AGENT_CMD: &[&str] = &[
+// AGENT_CMD=claude: isolated from the host user's Claude settings, hooks and MCP servers; only the vault's own
+// config applies. An argument list, not a string, because `Bash(brain lint:*)` contains a space.
+const CLAUDE_AGENT_CMD: &[&str] = &[
     "claude", "-p", "--setting-sources", "project", "--strict-mcp-config", "--permission-mode", "acceptEdits",
     "--allowedTools=Bash(git:*),Bash(grep:*),Bash(ls:*),Bash(date:*),Bash(brain lint:*),Bash(brain search:*),Bash(brain tags:*),Bash(brain fetch:*)",
     "--output-format", "stream-json", "--verbose", "--include-partial-messages",
@@ -606,16 +609,18 @@ fn check_changed(vault: &Path, before: &str) -> Result<Vec<String>> {
     Ok(issues.filter(|i| !i.warn).map(|i| i.to_string()).collect())
 }
 
-/// Run AGENT_CMD in the vault with the prompt on stdin and stream its progress. Caller holds the lock.
+/// Run the agent (built in, or AGENT_CMD with the prompt on stdin) in the vault and stream its progress. Caller holds the lock.
 fn run_agent(vault: &Path, prompt: &str, on: &mut dyn FnMut(Event)) -> Result<String> {
-    let custom = env::var("AGENT_CMD").ok();
+    let Some(custom) = env::var("AGENT_CMD").ok().filter(|c| !c.trim().is_empty()) else {
+        return agent::run(vault, prompt, on);
+    };
     let claude = match env::var("AGENT_FORMAT") {
         Ok(f) => f == "claude",
-        Err(_) => custom.is_none(),
+        Err(_) => custom == "claude",
     };
-    let cmd: Vec<String> = match custom {
-        Some(c) => c.split_whitespace().map(str::to_string).collect(),
-        None => DEFAULT_AGENT_CMD.iter().map(|s| s.to_string()).collect(),
+    let cmd: Vec<String> = match custom.as_str() {
+        "claude" => CLAUDE_AGENT_CMD.iter().map(|s| s.to_string()).collect(),
+        c => c.split_whitespace().map(str::to_string).collect(),
     };
     let (program, args) = cmd.split_first().ok_or("AGENT_CMD is empty")?;
 
