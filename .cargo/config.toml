@@ -1,4 +1,4 @@
 [env]
-# The static musl build needs a C compiler for onig (a C regex lib that candle pulls in via tokenizers).
-# No musl-gcc here; plain gcc works for onig's plain C, verified by identical search results and vectors.
+# The static musl build needs a C compiler for ring (rustls' crypto, used by ureq for https to aiproxy).
+# No musl-gcc here; plain gcc works for ring's plain C.
 CC_x86_64_unknown_linux_musl = "gcc"

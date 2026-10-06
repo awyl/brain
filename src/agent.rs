@@ -2,8 +2,6 @@
 //! (https://github.com/awyl/aiproxy). Used when AGENT_CMD is unset.
 //!
 //!   BRAIN_MODEL     model id, required, e.g. `opencode-go/deepseek-v4.1-flash` (must be on the chat-completions surface)
-//!   AIPROXY_URL     default http://127.0.0.1:8080
-//!   AIPROXY_TOKEN   bearer token for aiproxy, if it has one
 //!   BRAIN_MCP       aiproxy MCP servers to offer as tools (its X-MCP-Servers header, e.g. `searxng,ctx7`); unset = none
 //!
 //! Local tools: read/write/edit files inside the vault (never .git/), and `run` for an allowlist of commands,
@@ -17,6 +15,7 @@ use std::env;
 
 use serde_json::{Value, json};
 
+use crate::aiproxy::{Proxy, nonempty};
 use crate::{Event, Result};
 
 const MAX_ROUNDS: usize = 40;
@@ -24,8 +23,7 @@ const MAX_ROUNDS: usize = 40;
 const MAX_OUTPUT: usize = 30_000;
 
 pub struct Llm {
-    pub url: String,
-    pub token: Option<String>,
+    pub proxy: Proxy,
     pub model: String,
     pub mcp: Option<String>,
     /// One id per run, sent as `x-opencode-session`: OpenCode Go requires it, and it keeps the rounds on one prompt cache.
@@ -34,10 +32,8 @@ pub struct Llm {
 
 impl Llm {
     pub fn from_env() -> Result<Self> {
-        let nonempty = |k| env::var(k).ok().filter(|v: &String| !v.is_empty());
         Ok(Llm {
-            url: nonempty("AIPROXY_URL").unwrap_or_else(|| "http://127.0.0.1:8080".into()).trim_end_matches('/').into(),
-            token: nonempty("AIPROXY_TOKEN"),
+            proxy: Proxy::from_env(),
             model: nonempty("BRAIN_MODEL").ok_or("set BRAIN_MODEL (e.g. opencode-go/deepseek-v4.1-flash), or AGENT_CMD")?,
             mcp: nonempty("BRAIN_MCP"),
             session: format!("brain-{}-{}", std::process::id(), chrono::Local::now().timestamp_millis()),
@@ -45,26 +41,11 @@ impl Llm {
     }
 
     fn post(&self, path: &str, body: &Value) -> Result<ureq::Body> {
-        let agent: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
-        let mut req = agent
-            .post(format!("{}{path}", self.url))
-            .header("Content-Type", "application/json")
-            .header("x-opencode-session", &self.session)
-            .header("x-opencode-client", "brain");
-        if let Some(t) = &self.token {
-            req = req.header("Authorization", format!("Bearer {t}"));
-        }
+        let mut headers = vec![("x-opencode-session", self.session.as_str()), ("x-opencode-client", "brain")];
         if let Some(m) = &self.mcp {
-            req = req.header("X-MCP-Servers", m);
+            headers.push(("X-MCP-Servers", m));
         }
-        let resp = req.send(body.to_string())?;
-        let status = resp.status();
-        let mut body = resp.into_body();
-        if !status.is_success() {
-            let text = body.read_to_string().unwrap_or_default();
-            return Err(format!("aiproxy {path}: {status}: {}", text.trim()).into());
-        }
-        Ok(body)
+        self.proxy.post(path, body, &headers)
     }
 
     fn mcp_call(&self, method: &str, params: Value) -> Result<Value> {
@@ -345,7 +326,7 @@ mod tests {
         });
         let vault = env::temp_dir().join(format!("brain-agent-test-{}", std::process::id()));
         fs::create_dir_all(&vault).unwrap();
-        let llm = Llm { url, token: None, model: "m".into(), mcp: None, session: "s".into() };
+        let llm = Llm { proxy: Proxy { url, token: None }, model: "m".into(), mcp: None, session: "s".into() };
         let mut events = vec![];
         let reply = run_with(&llm, &vault, "save hi", &mut |e| events.push(match e {
             Event::Delta(t) | Event::Status(t) => t,

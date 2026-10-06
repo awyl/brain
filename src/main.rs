@@ -20,6 +20,7 @@
 //! /api/chat requires the token from BRAIN_TOKEN or $VAULT_DIR/.git/brain-token (generated on first serve).
 
 mod agent;
+mod aiproxy;
 mod fetch;
 mod lint;
 mod mcp;
@@ -251,7 +252,7 @@ fn run(server: Server, cfg: Config) {
     }
     if search::semantic_enabled() {
         let vault = cfg.vault.clone();
-        // Download the model and index the vault up front, so the first search doesn't wait.
+        // Index the vault up front, so the first search doesn't wait.
         thread::spawn(move || match search::update_index(&vault) {
             Ok((v, n)) => eprintln!("search index: {} files ({n} embedded)", v.len()),
             Err(e) => eprintln!("search index unavailable (full-text only): {e}"),
@@ -380,7 +381,7 @@ fn cloudflared() -> Result<PathBuf> {
     Ok(bin)
 }
 
-/// $XDG_CACHE_HOME/brain or ~/.cache/brain: downloaded cloudflared and embedding models.
+/// $XDG_CACHE_HOME/brain or ~/.cache/brain: the downloaded cloudflared.
 fn cache_dir() -> Result<PathBuf> {
     Ok(env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

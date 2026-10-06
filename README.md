@@ -14,9 +14,10 @@ phone (PWA) ──► brain serve ──► built-in agent in $VAULT_DIR ──�
 |---|---|
 | `src/main.rs` | The whole server: `init`, `serve`, `tunnel`, `ask`, `lint`, `upgrade`. |
 | `src/lint.rs` | Vault structure checks (no LLM). |
-| `src/search.rs` | Hybrid search: BM25 full-text + local embeddings. |
+| `src/search.rs` | Hybrid search: BM25 full-text + embeddings via aiproxy. |
 | `src/fetch.rs` | `brain fetch`: web page → plain text, fenced as untrusted. |
 | `src/agent.rs` | The built-in agent: tool loop over the vault, LLM calls through aiproxy. |
+| `src/aiproxy.rs` | The aiproxy connection (`AIPROXY_URL`, `AIPROXY_TOKEN`): chat, embeddings, MCP. |
 | `src/mcp.rs` | `brain mcp`: MCP server for agents in other projects. |
 | `web/` | Chat UI (installable PWA), compiled into the binary. Chat history stays on the device; **New** clears it. |
 | `template/` | Starting files for a new vault, compiled into the binary. `AGENTS.md` holds the librarian rules, `_templates/` the note types. |
@@ -25,7 +26,8 @@ phone (PWA) ──► brain serve ──► built-in agent in $VAULT_DIR ──�
 
 ```sh
 cargo build --release                         # → target/release/brain (one file, copy anywhere)
-# fully static, runs on any x86_64 Linux (~9MB): cargo build --release --target x86_64-unknown-linux-musl
+# fully static, runs on any x86_64 Linux (~5MB): cargo build --release --target x86_64-unknown-linux-musl
+# Nix: nix build (packages.default, with git, curl and cloudflared on its PATH); Home Manager: add it to home.packages
 brain init ~/brain                            # once: create the vault repo
 VAULT_DIR=~/brain brain serve                 # listens on 127.0.0.1:8787 (HOST/PORT to change)
 VAULT_DIR=~/brain brain tunnel                # same, plus a public https://*.trycloudflare.com URL
@@ -59,6 +61,7 @@ Open that on the phone in Safari, then Share → Add to Home Screen. The page sa
 | `TIDY_AT` | `HH:MM` local time for the daily job (`serve`/`tunnel`): Tidy if the inbox has items, then Profile if notes changed since the last one. |
 | `BRAIN_MODEL` | LLM model id via aiproxy (required), e.g. `opencode-go/deepseek-v4.1-flash`. |
 | `AIPROXY_URL` / `AIPROXY_TOKEN` | aiproxy address (default `http://127.0.0.1:8080`) and its bearer token. |
+| `BRAIN_EMBED` | aiproxy embedding model for semantic search, e.g. `embeddings-local/bge-small-en-v1.5`. Unset: full-text only. |
 | `BRAIN_MCP` | aiproxy MCP servers the agent may use, comma-separated, e.g. `searxng,ctx7` (sent as `X-MCP-Servers`, so `name:token` works too). Unset: none. |
 | `AGENT_CMD` / `AGENT_FORMAT` | External agent CLI instead of the built-in one, see below. |
 | `TUNNEL_TOKEN` / `TUNNEL_HOSTNAME` | Named tunnel, see below. |
@@ -135,6 +138,24 @@ The quick-tunnel URL changes on every restart, which breaks the shortcut; a name
 Notes tagged `private` are never served: not in search, not by name. The profile never draws on them either.
 Whatever an agent reads is sent to that agent's LLM provider.
 
+### Through aiproxy
+
+aiproxy can host it like any other stdio MCP server, so every agent connected to aiproxy gets the brain at `/mcp/brain` (or `brain` in `X-MCP-Servers`), with no per-agent setup. In `aiproxy.yaml`:
+```yaml
+mcp:
+  servers:
+    - name: brain
+      command: /path/to/brain
+      args: [mcp]
+      env:
+        VAULT_DIR: /home/me/brain
+        AIPROXY_URL: http://127.0.0.1:8080          # brain calls back into aiproxy for search embeddings
+        BRAIN_EMBED: embeddings-local/bge-small-en-v1.5
+```
+The child inherits aiproxy's environment, so `AIPROXY_TOKEN` carries over. If aiproxy runs in Docker, the binary and the vault must be mounted into the container.
+
+### Directly
+
 Register it for Claude Code (all projects):
 ```sh
 claude mcp add --scope user brain -e VAULT_DIR=$HOME/brain -- /path/to/brain mcp
@@ -145,16 +166,17 @@ Then add a standing rule to `~/.claude/CLAUDE.md`, e.g.: *Before choosing langua
 
 `brain search "cozy place for a flat white"` combines two rankings:
 - **Full text (BM25):** words in the body, frontmatter values, titles and aliases (counted 3×). Pure Rust, no index.
-- **Meaning:** a local embedding model, downloaded on first use to `~/.cache/brain/models/`. The vectors live in `$VAULT_DIR/.git/brain-index.json` (never committed) and get updated incrementally after every agent run. `serve` builds the index at startup.
+- **Meaning:** embeddings from aiproxy's `/v1/embeddings` (`BRAIN_EMBED`; aiproxy's `embeddings-local/*` models run on its CPU, no keys). The vectors live in `$VAULT_DIR/.git/brain-index.json` (never committed) and get updated incrementally after every agent run. `serve` builds the index at startup.
 
 The two lists are merged by reciprocal rank fusion. Each hit shows why it matched (`text 7.0, meaning 0.65`).
 The agent uses `brain search` before creating a note (to avoid duplicates) and to answer fuzzy questions.
 
 | Var | Effect |
 |---|---|
-| `BRAIN_EMBED` | `english` (default, `bge-small-en-v1.5`, ~130MB) or `multilingual` (`multilingual-e5-small`, ~470MB). |
-| `BRAIN_SEMANTIC=0` | Full-text only: no model download, no index. |
+| `BRAIN_EMBED` | Embedding model id, e.g. `embeddings-local/bge-small-en-v1.5`. Unset: full-text only, no index. Changing it re-embeds the vault once. |
 | `BRAIN_MIN_SIM` / `BRAIN_DUP_SIM` | Tuning: the semantic match floor (0.58), and the content similarity that flags a duplicate (0.90). |
+
+Query/passage prefixes and these defaults are picked by model family (`bge`, `e5`, `nomic` in the id); other models get no prefix and the bge defaults.
 
 Small embedding models can't tell "the same book" from "two books on the same topic" by content alone. That's why content duplicates are only flagged for near-copies, and the main defense is searching before creating.
 

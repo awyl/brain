@@ -1,30 +1,27 @@
-//! Hybrid search over the vault: full-text (BM25) + semantic (local embeddings), merged by rank fusion.
+//! Hybrid search over the vault: full-text (BM25) + semantic (embeddings), merged by rank fusion.
 //!
-//! The embedding model is a small BERT downloaded on first use into the cache dir (BRAIN_EMBED=english|multilingual).
+//! BRAIN_EMBED=<aiproxy embedding model> turns the semantic half on, e.g. `embeddings-local/bge-small-en-v1.5`
+//! (aiproxy runs it locally on CPU). Unset: full-text only.
 //! Vectors live in `.git/brain-index.json` (never committed), updated incrementally by content hash.
-//! BRAIN_SEMANTIC=0 turns the semantic half off (no download, full-text only).
 
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use candle_core::{Device, IndexOp, Tensor};
-use candle_nn::VarBuilder;
-use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use serde_json::{Value, json};
-use tokenizers::{Tokenizer, TruncationParams};
 
 use crate::Result;
+use crate::aiproxy::{Proxy, nonempty};
+
+/// Texts per embeddings request when indexing.
+const BATCH: usize = 32;
 
 struct Preset {
-    name: &'static str,
-    repo: &'static str,
+    /// Matched against the model id.
+    family: &'static str,
     query_prefix: &'static str,
     passage_prefix: &'static str,
-    /// CLS-token pooling (bge) vs mean pooling (e5).
-    cls: bool,
     /// Cosine similarity above which two same-type notes are flagged as possible duplicates.
     dup_threshold: f32,
     /// Below this, a semantic match is noise and isn't shown...
@@ -33,84 +30,61 @@ struct Preset {
     window: f32,
 }
 
+/// Per model family: the prefixes it was trained with, and score bands tuned on a real vault (bge, e5).
+/// The last entry is the fallback: no prefixes, bge's bands; tune with BRAIN_MIN_SIM / BRAIN_DUP_SIM.
 const PRESETS: &[Preset] = &[
     Preset {
-        name: "english",
-        repo: "BAAI/bge-small-en-v1.5",
+        family: "bge",
         query_prefix: "Represent this sentence for searching relevant passages: ",
         passage_prefix: "",
-        cls: true,
         dup_threshold: 0.90,
         min_similarity: 0.58,
         window: 0.05,
     },
+    Preset { family: "e5", query_prefix: "query: ", passage_prefix: "passage: ", dup_threshold: 0.93, min_similarity: 0.80, window: 0.03 },
     Preset {
-        name: "multilingual",
-        repo: "intfloat/multilingual-e5-small",
-        query_prefix: "query: ",
-        passage_prefix: "passage: ",
-        cls: false,
-        dup_threshold: 0.93,
-        min_similarity: 0.80,
-        window: 0.03,
+        family: "nomic",
+        query_prefix: "search_query: ",
+        passage_prefix: "search_document: ",
+        dup_threshold: 0.90,
+        min_similarity: 0.58,
+        window: 0.05,
     },
+    Preset { family: "", query_prefix: "", passage_prefix: "", dup_threshold: 0.90, min_similarity: 0.58, window: 0.05 },
 ];
 
+fn embed_model() -> Option<String> {
+    nonempty("BRAIN_EMBED")
+}
+
 pub fn semantic_enabled() -> bool {
-    env::var("BRAIN_SEMANTIC").map_or(true, |v| v != "0")
+    embed_model().is_some()
 }
 
-fn preset() -> Result<&'static Preset> {
-    let name = env::var("BRAIN_EMBED").unwrap_or_else(|_| "english".into());
-    PRESETS.iter().find(|p| p.name == name).ok_or_else(|| format!("BRAIN_EMBED must be english or multilingual, got {name:?}").into())
+fn preset(model: &str) -> &'static Preset {
+    PRESETS.iter().find(|p| model.contains(p.family)).unwrap()
 }
 
-pub struct Model {
-    preset: &'static Preset,
-    bert: BertModel,
-    tok: Tokenizer,
-}
-
-impl Model {
-    fn load() -> Result<Self> {
-        let preset = preset()?;
-        let dir = crate::cache_dir()?.join("models").join(preset.name);
-        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
-            if !dir.join(file).exists() {
-                crate::download(&format!("https://huggingface.co/{}/resolve/main/{file}", preset.repo), &dir.join(file))?;
-            }
-        }
-        let config: Config = serde_json::from_str(&fs::read_to_string(dir.join("config.json"))?)?;
-        // Safety: the safetensors file is ours (cache dir) and isn't modified while mapped.
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[dir.join("model.safetensors")], DTYPE, &Device::Cpu)? };
-        let bert = BertModel::load(vb, &config)?;
-        let mut tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| e.to_string())?;
-        tok.with_truncation(Some(TruncationParams { max_length: 512, ..Default::default() })).map_err(|e| e.to_string())?;
-        tok.with_padding(None);
-        Ok(Model { preset, bert, tok })
+/// Unit-length embeddings of `texts` from aiproxy's /v1/embeddings, as queries or as stored passages.
+fn embed(model: &str, texts: &[String], query: bool) -> Result<Vec<Vec<f32>>> {
+    let p = preset(model);
+    let prefix = if query { p.query_prefix } else { p.passage_prefix };
+    let input: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+    let body = json!({ "model": model, "input": input });
+    let v: Value = serde_json::from_reader(Proxy::from_env().post("/v1/embeddings", &body, &[])?.into_reader())?;
+    let mut data = v["data"].as_array().cloned().unwrap_or_default();
+    data.sort_by_key(|d| d["index"].as_u64());
+    if data.len() != texts.len() {
+        return Err(format!("embeddings: sent {} texts, got {} vectors", texts.len(), data.len()).into());
     }
-
-    /// Unit-length embedding of `text`, as a query or as a stored passage.
-    fn embed(&self, text: &str, query: bool) -> Result<Vec<f32>> {
-        let prefix = if query { self.preset.query_prefix } else { self.preset.passage_prefix };
-        let enc = self.tok.encode(format!("{prefix}{text}"), true).map_err(|e| e.to_string())?;
-        let ids = Tensor::new(enc.get_ids(), &Device::Cpu)?.unsqueeze(0)?;
-        let mask = Tensor::new(enc.get_attention_mask(), &Device::Cpu)?.unsqueeze(0)?;
-        let out = self.bert.forward(&ids, &ids.zeros_like()?, Some(&mask))?.i(0)?; // [tokens, hidden]
-        let v = if self.preset.cls { out.i(0)? } else { out.mean(0)? };
-        let v = v.broadcast_div(&v.sqr()?.sum_all()?.sqrt()?)?;
-        Ok(v.to_vec1::<f32>()?)
-    }
-}
-
-/// The model, loaded once per process (it's ~130–470MB in memory). A failed load is retried next time.
-fn model() -> Result<Arc<Model>> {
-    static MODEL: Mutex<Option<Arc<Model>>> = Mutex::new(None);
-    let mut m = MODEL.lock().unwrap();
-    if m.is_none() {
-        *m = Some(Arc::new(Model::load()?));
-    }
-    Ok(m.clone().unwrap())
+    Ok(data
+        .iter()
+        .map(|d| {
+            let v = vector(&d["embedding"]);
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(f32::EPSILON);
+            v.into_iter().map(|x| x / norm).collect()
+        })
+        .collect())
 }
 
 /// A searchable file: vault-relative path and contents.
@@ -172,7 +146,7 @@ pub fn fresh_vectors(vault: &Path) -> HashMap<String, Vec<f32>> {
     let Ok(index) = fs::read_to_string(index_path(vault)).map(|s| serde_json::from_str::<Value>(&s).unwrap_or_default()) else {
         return HashMap::new();
     };
-    if preset().ok().map(|p| p.name) != index["model"].as_str() {
+    if embed_model().as_deref() != index["model"].as_str() {
         return HashMap::new();
     }
     docs(vault)
@@ -190,36 +164,33 @@ fn vector(v: &Value) -> Vec<f32> {
 
 /// Embed new or changed files, drop deleted ones. Returns (vectors, how many were embedded).
 pub fn update_index(vault: &Path) -> Result<(HashMap<String, Vec<f32>>, usize)> {
-    let model = model()?;
+    let model = embed_model().ok_or("BRAIN_EMBED is not set")?;
     // One writer at a time across processes (server, cron, the agent running `brain search`).
     let lock = File::create(vault.join(".git/brain-index.lock"))?;
     lock.lock()?;
     let old: Value = fs::read_to_string(index_path(vault)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    let same_model = old["model"].as_str() == Some(model.preset.name);
+    let same_model = old["model"].as_str() == Some(&model);
 
-    let (mut vectors, mut entries, mut embedded) = (HashMap::new(), serde_json::Map::new(), 0);
-    for d in docs(vault) {
-        let hash = fnv(&d.text);
-        let old_entry = &old["entries"][&d.rel];
-        let v = if same_model && old_entry["hash"].as_u64() == Some(hash) {
-            vector(&old_entry["vec"])
-        } else {
-            embedded += 1;
-            model.embed(&semantic_text(&d.text), false)?
-        };
-        entries.insert(d.rel.clone(), json!({ "hash": hash, "vec": v }));
-        vectors.insert(d.rel, v);
+    let docs = docs(vault);
+    let (keep, todo): (Vec<&Doc>, Vec<&Doc>) =
+        docs.iter().partition(|d| same_model && old["entries"][&d.rel]["hash"].as_u64() == Some(fnv(&d.text)));
+    let mut vectors: HashMap<String, Vec<f32>> = keep.iter().map(|d| (d.rel.clone(), vector(&old["entries"][&d.rel]["vec"]))).collect();
+    for chunk in todo.chunks(BATCH) {
+        let texts: Vec<String> = chunk.iter().map(|d| semantic_text(&d.text)).collect();
+        vectors.extend(chunk.iter().map(|d| d.rel.clone()).zip(embed(&model, &texts, false)?));
     }
-    if embedded > 0 || entries.len() != old["entries"].as_object().map_or(0, |o| o.len()) {
+    let entries: serde_json::Map<String, Value> =
+        docs.iter().map(|d| (d.rel.clone(), json!({ "hash": fnv(&d.text), "vec": vectors[&d.rel] }))).collect();
+    if !todo.is_empty() || entries.len() != old["entries"].as_object().map_or(0, |o| o.len()) {
         let tmp = vault.join(".git/brain-index.json.part");
-        fs::write(&tmp, json!({ "model": model.preset.name, "entries": entries }).to_string())?;
+        fs::write(&tmp, json!({ "model": model, "entries": entries }).to_string())?;
         fs::rename(tmp, index_path(vault))?;
     }
-    Ok((vectors, embedded))
+    Ok((vectors, todo.len()))
 }
 
 pub fn dup_threshold() -> f32 {
-    let default = preset().map_or(1.1, |p| p.dup_threshold);
+    let default = embed_model().map_or(1.1, |m| preset(&m).dup_threshold);
     env::var("BRAIN_DUP_SIM").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
@@ -280,10 +251,10 @@ pub fn search(vault: &Path, query: &str, k: usize, include_private: bool) -> Res
 
     // Meaning: cosine similarity against the stored vectors.
     let mut meaning_rank: Vec<(usize, f32)> = vec![];
-    if semantic_enabled() {
+    if let Some(model) = embed_model() {
         let (vectors, _) = update_index(vault)?;
-        let qv = model()?.embed(query, true)?;
-        let p = preset()?;
+        let qv = embed(&model, &[query.to_string()], true)?.remove(0);
+        let p = preset(&model);
         let floor = env::var("BRAIN_MIN_SIM").ok().and_then(|v| v.parse().ok()).unwrap_or(p.min_similarity);
         meaning_rank = docs.iter().enumerate().filter_map(|(i, d)| Some((i, cosine(&qv, vectors.get(&d.rel)?)))).collect();
         meaning_rank.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -365,6 +336,13 @@ fn snippet(text: &str, q: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preset_by_model_family() {
+        assert_eq!(preset("embeddings-local/bge-small-en-v1.5").family, "bge");
+        assert_eq!(preset("embeddings-local/nomic-embed-text-v1.5").family, "nomic");
+        assert_eq!(preset("embeddings-local/all-MiniLM-L6-v2").family, "");
+    }
 
     #[test]
     fn tokenizes_words_and_cjk() {
