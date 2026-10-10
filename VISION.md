@@ -1,11 +1,11 @@
 # Vision
 
-**Goal: a second brain that records me and becomes similar to me.**
-Not a map of the world's knowledge, but a map of *me*: what I did, liked and thought, and why. It should be able to answer "what's my…", "did I…", and eventually "would I like…?".
+**Goal: a second brain that records me, learns what I learn, and becomes similar to me.**
+Not a map of the world's knowledge, but a map of *me*: what I did, liked, thought and learned, and why. It should be able to answer "what's my…", "did I…", "what do I know about…", and eventually "would I like…?".
 
 ## Principles
 
-1. **Record me, not the world.** The LLM already knows general knowledge at question time. Storing it adds nothing, drowns my own facts and mixes unchecked claims into my records.
+1. **Record me, including what I know.** Knowledge I learned goes in, in my words, dated, with where I learned it. General knowledge I never learned stays out: the LLM already has it at question time, and storing it drowns my own facts and mixes unchecked claims into my records.
 2. **Provenance is sacred.** My facts are dated bullets in my words. Anything the LLM adds (summaries, context, synthesis) is marked as such and links to the notes it comes from. Never mix the two.
 3. **Why beats what.** A list of things I like is shallow. My reasons ("light roast, quiet, solo seating") are what make the brain similar to me.
 4. **Structure is enforced by code, not by prompts.** Templates are the schema; `brain lint` checks it; the agent gets a fix round. Prompts drift; checks don't.

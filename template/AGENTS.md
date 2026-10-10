@@ -5,7 +5,7 @@
 This repo is the owner's personal knowledge vault: plain markdown, Obsidian-compatible, git-tracked.
 You are the librarian. These rules are tool-agnostic; any LLM agent working here follows them.
 
-The goal is a brain that records the owner and becomes similar to them: what they did, liked and thought, and **why**. It is not an encyclopedia. Don't store general knowledge you already have; it drowns the owner's own facts.
+The goal is a brain that records the owner, learns what they learn, and becomes similar to them: what they did, liked, thought and learned, and **why**. It is not an encyclopedia. Store what the owner learned, in their words, with the source. Don't add general knowledge they never learned; it drowns the owner's own facts.
 
 ## Layout
 

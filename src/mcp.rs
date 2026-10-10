@@ -30,7 +30,7 @@ pub fn serve(vault: &Path) -> Result<()> {
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "brain", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "The user's second brain: their profile, preferences and notes. Consult it before decisions that \
+                "instructions": "The user's second brain: their profile, preferences, what they did and what they know. Consult it before decisions that \
                     depend on their taste or way of working (languages, tools, style). Report lasting preferences with brain_remember.",
             })),
             "ping" => Ok(json!({})),

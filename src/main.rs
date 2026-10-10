@@ -1,4 +1,4 @@
-//! Second brain server: one binary that serves the chat PWA and drives an agent CLI over a vault.
+//! Second brain server: one binary that serves the chat PWA and drives the built-in agent over a vault.
 //!
 //!   brain init <dir>   create a vault from the embedded template
 //!   brain serve        serve the PWA (env: VAULT_DIR, HOST=127.0.0.1, PORT=8787)

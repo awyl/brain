@@ -1,6 +1,7 @@
 # Second Brain Server
 
-Chat with an LLM from your phone to capture and query a personal markdown vault (Obsidian-compatible, git-tracked).
+A second brain that records you, learns what you learn, and becomes similar to you.
+Chat with it from your phone to capture and query a personal markdown vault (Obsidian-compatible, git-tracked); agents in other projects use it over MCP.
 This repo builds a single binary, `brain`. The vault is a separate git repo it manages.
 
 ```
