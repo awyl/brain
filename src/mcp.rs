@@ -11,6 +11,23 @@ use serde_json::{Value, json};
 
 use crate::{Result, capture, search, search_cmd};
 
+/// Sent at `initialize`. The first line must stand alone: pi lists only that line in its system prompt.
+/// Clients that drop server instructions still see the record rules in brain_remember's description.
+const INSTRUCTIONS: &str = "The user's second brain: check it before choices that depend on their taste, and record their \
+preferences, what they did and what they learned with brain_remember, without asking.
+
+Read it before decisions that depend on their taste or way of working (languages, tools, architecture, style, \
+recommendations): brain_profile once per task, then brain_search for specifics. If it conflicts with the conversation, \
+the conversation wins.
+
+Record without being asked, with brain_remember, one fact per call, in their words, with the why when they give one \
+and the project name as source:
+- a lasting preference, or a correction of your choice (\"make it a single binary\");
+- something they did: started, finished, shipped, decided (\"started Hades\", \"moved the blog to Zola\");
+- something they learned or now know (\"btrfs snapshots need a separate subvolume for /home\").
+Skip task details, temporary state, secrets, and general knowledge they didn't learn. Don't ask first: it goes to \
+their inbox for review.";
+
 pub fn serve(vault: &Path) -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -30,8 +47,7 @@ pub fn serve(vault: &Path) -> Result<()> {
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "brain", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "The user's second brain: their profile, preferences, what they did and what they know. Consult it before decisions that \
-                    depend on their taste or way of working (languages, tools, style). Report lasting preferences with brain_remember.",
+                "instructions": INSTRUCTIONS,
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),
@@ -75,11 +91,12 @@ fn tools() -> Value {
         },
         {
             "name": "brain_remember",
-            "description": "Save a lasting preference or fact about the user to their inbox, for them to review: when they state one \
-                (\"I don't like Python\") or correct your choice. One fact per call, in the user's words where possible. \
-                Not for task details or anything temporary.",
+            "description": "Save something lasting about the user to their inbox, for them to review. Call it without being asked when \
+                they state a preference or correct your choice, did something (started, finished, shipped, decided), or learned \
+                something. One fact per call, in their words, with the why when given. Not for task details, temporary state, \
+                secrets, or general knowledge they didn't learn.",
             "inputSchema": { "type": "object", "properties": {
-                "text": string("The preference or fact."),
+                "text": string("The fact, in the user's words."),
                 "source": string("Where it came from, e.g. the project name."),
             }, "required": ["text"] },
         },
@@ -119,7 +136,7 @@ fn profile(vault: &Path, section: &str) -> Result<String> {
         return Ok(body.to_string());
     }
     let wanted = section.to_lowercase();
-    let mut parts = body.split("\n## ");
+    let mut parts = body.split("\n## ").skip(1);
     let found = parts.find(|p| p.lines().next().unwrap_or("").to_lowercase().contains(&wanted));
     match found {
         Some(p) => Ok(format!("## {}", p.trim())),

@@ -134,7 +134,9 @@ The quick-tunnel URL changes on every restart, which breaks the shortcut; a name
 | `brain_profile(section?)` | The profile, or one section (e.g. `Work & tools`). |
 | `brain_search(query)` | Search notes by words and meaning. |
 | `brain_note(name)` | One note in full. |
-| `brain_remember(text, source?)` | Save a preference the agent noticed, **to `inbox/` only**. Tidy files it (usually into `me/work.md`) with its source. |
+| `brain_remember(text, source?)` | Save a preference, something the user did or learned, **to `inbox/` only**. Tidy files it with its source. |
+
+At `initialize` the server sends instructions (`INSTRUCTIONS` in `src/mcp.rs`): read the profile before taste-dependent decisions, and record preferences, things done and things learned without being asked. Clients that ignore server instructions still see the record rules in `brain_remember`'s description.
 
 Notes tagged `private` are never served: not in search, not by name. The profile never draws on them either.
 Whatever an agent reads is sent to that agent's LLM provider.
@@ -161,7 +163,15 @@ Register it for Claude Code (all projects):
 ```sh
 claude mcp add --scope user brain -e VAULT_DIR=$HOME/brain -- /path/to/brain mcp
 ```
-Then add a standing rule to `~/.claude/CLAUDE.md`, e.g.: *Before choosing languages, tools, architecture or style for me, check `brain_profile` (section "Work & tools"). When I state a lasting preference or correct your choice, save it with `brain_remember`.*
+Claude Code puts the server instructions in its system prompt, so no standing rule is needed.
+
+For pi (1.0+, built-in MCP), add it to `~/.pi/agent/mcp.json`:
+```json
+{ "mcpServers": { "brain": { "command": "/path/to/brain", "args": ["mcp"], "env": { "VAULT_DIR": "/home/me/brain" }, "exposure": "direct" } } }
+```
+`exposure: direct` declares the four tools to the model like built-ins, so pi sees `brain_remember`'s record rules. The default (`codemode`) hides them behind scripts. pi lists only the first line of the server instructions in its system prompt; that line carries the rule on its own.
+
+Through aiproxy (`/mcp`, `/mcp/brain`, or pi's aiproxy extension), agents get the tools but not yet the server instructions: aiproxy doesn't forward them. `brain_remember`'s description still carries the record rules.
 
 ## Search
 
