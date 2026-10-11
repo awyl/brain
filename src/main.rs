@@ -127,6 +127,11 @@ fn init(dir: &Path) -> Result<()> {
         fs::write(path, content)?;
     }
     git(dir, &["init", "-q"])?;
+    // A service user often has no git identity, and every commit would fail.
+    if git_out(dir, &["config", "user.email"]).is_err() {
+        git(dir, &["config", "user.name", "brain"])?;
+        git(dir, &["config", "user.email", "brain@localhost"])?;
+    }
     git(dir, &["add", "-A"])?;
     git(dir, &["commit", "-qm", "init vault"])?;
     println!("vault created at {}", dir.display());
