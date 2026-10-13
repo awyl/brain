@@ -521,7 +521,11 @@ fn capture(vault: &Path, text: &str) -> Result<String> {
     let name = format!("{}-{slug}.md", chrono::Local::now().format("%Y-%m-%d-%H%M%S"));
     let _lock = lock(vault)?;
     fs::write(vault.join("inbox").join(&name), format!("{text}\n"))?;
-    git(vault, &["add", &format!("inbox/{name}")])?;
+    // No git here (e.g. `brain mcp` in a container): the note stays uncommitted until the server's next commit.
+    match git(vault, &["add", &format!("inbox/{name}")]) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(format!("Saved to inbox/{name}")),
+        r => r?,
+    }
     git(vault, &["commit", "-qm", &format!("inbox: {slug}")])?;
     push(vault);
     Ok(format!("Saved to inbox/{name}"))
