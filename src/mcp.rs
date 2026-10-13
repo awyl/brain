@@ -17,8 +17,10 @@ const INSTRUCTIONS: &str = "The user's second brain: check it before choices tha
 preferences, what they did and what they learned with brain_remember, without asking.
 
 Read it before decisions that depend on their taste or way of working (languages, tools, architecture, style, \
-recommendations): brain_profile once per task, then brain_search for specifics. If it conflicts with the conversation, \
-the conversation wins.
+recommendations): brain_profile with the section for the task's domain (\"Work & tools\" for coding, \"Taste\" for \
+recommendations), or a subsection it lists for more detail; then brain_search for the specific choice. Call it with no \
+section only when the domain is unclear: that gives the overview. If it conflicts with the conversation, the \
+conversation wins.
 
 Record without being asked, with brain_remember, one fact per call, in their words, with the why when they give one \
 and the project name as source:
@@ -76,7 +78,7 @@ fn tools() -> Value {
             "description": "The user's profile, synthesized from their notes: work & tools (languages, style, what they push back on), \
                 taste, habits, interests, dislikes. Check it before choosing languages, tools, architecture or style for them.",
             "inputSchema": { "type": "object", "properties": {
-                "section": string("Optional section name, e.g. \"Work & tools\" or \"Taste\". Omit for the whole profile."),
+                "section": string("Section or subsection name, e.g. \"Work & tools\" or \"Taste\". Omit for the overview (summaries and subsection names)."),
             }},
         },
         {
@@ -128,22 +130,63 @@ fn call(vault: &Path, name: &Value, args: &Value) -> Value {
     }
 }
 
-/// me/profile.md without frontmatter, optionally just one `## Section` (case-insensitive substring match).
 fn profile(vault: &Path, section: &str) -> Result<String> {
     let text = fs::read_to_string(vault.join("me/profile.md")).map_err(|_| "no profile yet")?;
-    let body = search::split_frontmatter(&text).1.trim();
+    profile_part(search::split_frontmatter(&text).1.trim(), section)
+}
+
+/// The profile is two levels: `## Section` (summary bullets) and optional `### Subsection` (detail).
+/// No section: the overview, each section's subsections folded into their names.
+/// A name (case-insensitive substring): that `## ` section in full, else that `### ` subsection.
+fn profile_part(body: &str, section: &str) -> Result<String> {
+    let mut parts = body.split("\n## ");
+    let name = |p: &str| p.lines().next().unwrap_or("").to_string();
     if section.is_empty() {
-        return Ok(body.to_string());
+        let mut out = parts.next().unwrap_or("").trim_end().to_string();
+        for p in parts {
+            let mut subs = p.split("\n### ");
+            out += &format!("\n\n## {}", subs.next().unwrap_or("").trim_end());
+            let names: Vec<String> = subs.map(name).collect();
+            if !names.is_empty() {
+                out += &format!("\nMore detail, by name: {}", names.join(", "));
+            }
+        }
+        return Ok(out);
     }
     let wanted = section.to_lowercase();
-    let mut parts = body.split("\n## ").skip(1);
-    let found = parts.find(|p| p.lines().next().unwrap_or("").to_lowercase().contains(&wanted));
-    match found {
-        Some(p) => Ok(format!("## {}", p.trim())),
-        None => {
-            let names: Vec<&str> = body.split("\n## ").skip(1).filter_map(|p| p.lines().next()).collect();
-            Err(format!("no section matching {section:?}; sections: {}", names.join(", ")).into())
+    let matches = |p: &str| name(p).to_lowercase().contains(&wanted);
+    let sections: Vec<&str> = parts.skip(1).collect();
+    if let Some(p) = sections.iter().find(|p| matches(p)) {
+        return Ok(format!("## {}", p.trim()));
+    }
+    for p in &sections {
+        if let Some(s) = p.split("\n### ").skip(1).find(|s| matches(s)) {
+            return Ok(format!("## {}\n### {}", name(p), s.trim()));
         }
+    }
+    let names: Vec<String> = sections.iter().flat_map(|p| p.split("\n### ").map(name)).collect();
+    Err(format!("no section matching {section:?}; sections: {}", names.join(", ")).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::profile_part;
+
+    const BODY: &str = "# Profile\n\n> Generated.\n\n## Work & tools\n- Rust first\n\n### Rust\n- no async\n\n### Web\n- plain HTML\n\n## Taste\n- quiet places";
+
+    #[test]
+    fn overview_folds_subsections() {
+        let o = profile_part(BODY, "").unwrap();
+        assert!(o.contains("- Rust first\nMore detail, by name: Rust, Web\n\n## Taste\n- quiet places"), "{o}");
+        assert!(!o.contains("no async"));
+    }
+
+    #[test]
+    fn finds_sections_then_subsections() {
+        assert!(profile_part(BODY, "work").unwrap().contains("no async"));
+        assert_eq!(profile_part(BODY, "web").unwrap(), "## Work & tools\n### Web\n- plain HTML");
+        let e = profile_part(BODY, "zzz").unwrap_err().to_string();
+        assert!(e.ends_with("sections: Work & tools, Rust, Web, Taste"), "{e}");
     }
 }
 

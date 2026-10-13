@@ -131,7 +131,7 @@ The quick-tunnel URL changes on every restart, which breaks the shortcut; a name
 
 | Tool | What |
 |---|---|
-| `brain_profile(section?)` | The profile, or one section (e.g. `Work & tools`). |
+| `brain_profile(section?)` | The profile overview (section summaries, subsection names), or one section or `### ` subsection by name (e.g. `Work & tools`, `Rust`). |
 | `brain_search(query)` | Search notes by words and meaning. |
 | `brain_note(name)` | One note in full. |
 | `brain_remember(text, source?)` | Save a preference, something the user did or learned, **to `inbox/` only**. Tidy files it with its source. |
