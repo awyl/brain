@@ -411,6 +411,14 @@ fn handle(mut req: tiny_http::Request, cfg: &Config) -> Result<()> {
     let ctype = |v: &str| Header::from_bytes("Content-Type", v).unwrap();
     let path = req.url().split('?').next().unwrap_or("/").to_string();
     match (req.method(), path.as_str()) {
+        (Method::Get, "/api/questions") => {
+            if !authorized(&req, cfg, "/api/questions") {
+                return Ok(req.respond(Response::empty(401))?);
+            }
+            let text = fs::read_to_string(cfg.vault.join("me/questions.md")).unwrap_or_default();
+            let body = json!({ "questions": questions(&text) }).to_string();
+            req.respond(Response::from_string(body).with_header(ctype("application/json")))?
+        }
         (Method::Get, path) => {
             eprintln!("GET {path}{}", if req.url().contains("token=") { " (with ?token=)" } else { "" });
             match WEB.iter().find(|(p, ..)| *p == path || (*p == "/" && path == "/index.html")) {
@@ -488,7 +496,7 @@ fn authorized(req: &tiny_http::Request, cfg: &Config, path: &str) -> bool {
         None => "no Authorization header".to_string(),
         Some(a) => format!("wrong token (got {} chars, want Bearer + {})", a.len(), cfg.token.len()),
     };
-    eprintln!("POST {path} 401: {why}");
+    eprintln!("{} {path} 401: {why}", req.method());
     false
 }
 
@@ -502,6 +510,14 @@ fn lock(vault: &Path) -> Result<File> {
     let f = File::create(vault.join(".git/brain.lock"))?;
     f.lock()?;
     Ok(f)
+}
+
+/// The bullets of me/questions.md (open questions from the Profile workflow), without their evidence links.
+fn questions(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.strip_prefix("- "))
+        .map(|q| q.rfind(" ([[").map_or(q, |i| &q[..i]).trim().to_string())
+        .collect()
 }
 
 /// Fast path: write raw text to inbox/ and commit, no LLM.
@@ -742,4 +758,13 @@ fn git_out(dir: &Path, args: &[&str]) -> Result<String> {
 fn git(dir: &Path, args: &[&str]) -> io::Result<()> {
     let st = Command::new("git").args(args).current_dir(dir).status()?;
     if st.success() { Ok(()) } else { Err(io::Error::other(format!("git {} failed", args.join(" ")))) }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn questions_drop_frontmatter_and_evidence() {
+        let text = "---\ntags: [me]\nupdated: 2026-10-13\n---\n# Open questions\n\n- how often do you play? ([[badminton]])\n- anything else?\n";
+        assert_eq!(super::questions(text), ["how often do you play?", "anything else?"]);
+    }
 }

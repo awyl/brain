@@ -103,7 +103,7 @@ After each agent run, `brain` checks the notes that run changed. On problems, th
 ## The brain
 
 What makes it more than a notebook (see [VISION.md](VISION.md)):
-- **Profile:** `me/profile.md` is a generated synthesis of who you are (taste, habits, interests, dislikes, open questions). Every claim links its evidence. It's rebuilt by the daily job when notes changed, or on "update my profile". The agent reads it for "would I like…" questions.
+- **Profile:** `me/profile.md` is a generated synthesis of who you are (taste, habits, interests, dislikes). Every claim links its evidence. Gaps go to `me/questions.md`: the **Q** button in the chat lists them, tap one to answer. It's rebuilt by the daily job when notes changed, or on "update my profile". The agent reads it for "would I like…" questions.
 - **Entities:** creators, cities, cuisines and brands that appear in 2 or more notes get an `entity` page linking them. Lint warns about recurring names without one; Tidy creates them.
 - **Why:** when a capture has no reason or feeling, the agent asks one short follow-up and records the answer.
 - **Links:** shared URLs are fetched (`brain fetch`). An article becomes a `source` note with an LLM summary and your take; a reference page becomes a linked fact on the thing it's about.

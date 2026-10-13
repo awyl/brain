@@ -31,12 +31,14 @@
   button { font:inherit; padding:0 16px; border:0; border-radius:12px; background:var(--fg); color:var(--bg); }
   button:disabled { opacity:.4; }
   button.secondary { padding:0 12px; background:transparent; color:var(--muted); border:1px solid var(--line); }
+  button.q { display:block; width:100%; margin-top:6px; padding:6px 10px; text-align:left; color:var(--fg); }
 </style>
 </head>
 <body>
 <div id="log"><p class="hint">Ask or tell anything. Start with <b>+</b> to dump straight to the inbox.</p></div>
 <form id="f">
   <button type="button" id="n" class="secondary" title="Start a new chat (clears context)">New</button>
+  <button type="button" id="q" class="secondary" title="Open questions about you">Q</button>
   <textarea id="t" rows="1" placeholder="Message" autofocus></textarea>
   <button id="b">Send</button>
 </form>
@@ -60,18 +62,36 @@ document.getElementById('n').addEventListener('click', () => {
   log.querySelectorAll('.msg').forEach(m => m.remove());
   t.focus();
 });
-async function send(message) {
-  const post = () => fetch('api/chat', { method:'POST',
-    headers:{ 'Content-Type':'application/json', 'Authorization':'Bearer ' + store.get() },
-    body:JSON.stringify({ message, history: turns() }) });
-  let r = await post();
+// fetch with the token; on 401 asks for it once and retries.
+async function api(path, opts = {}) {
+  const go = () => fetch(path, { ...opts, headers:{ ...opts.headers, 'Authorization':'Bearer ' + store.get() } });
+  let r = await go();
   if (r.status === 401) {
     const tok = prompt('Access token (printed by brain serve):');
     if (!tok) return r;
-    store.set(tok.trim()); r = await post();
+    store.set(tok.trim()); r = await go();
   }
   return r;
 }
+const send = message => api('api/chat', { method:'POST', headers:{ 'Content-Type':'application/json' },
+  body:JSON.stringify({ message, history: turns() }) });
+const failed = r => new Error(r.status === 401 ? 'Unauthorized: wrong or missing token.' : `Error ${r.status}`);
+// Open questions from the profile: tap one to start an answer. Not kept in the chat log.
+document.getElementById('q').addEventListener('click', async () => {
+  const d = add('…', 'bot');
+  try {
+    const r = await api('api/questions');
+    if (!r.ok) throw failed(r);
+    const { questions } = await r.json();
+    d.textContent = questions.length ? 'Open questions, tap one to answer:' : 'No open questions.';
+    for (const q of questions) {
+      const btn = d.appendChild(document.createElement('button'));
+      btn.type = 'button'; btn.className = 'secondary q'; btn.textContent = q;
+      btn.onclick = () => { t.value = `Q: ${q} A: `; t.focus(); };
+    }
+  } catch (err) { d.textContent = err.message; }
+  log.scrollTop = log.scrollHeight;
+});
 function add(text, cls) {
   const d = document.createElement('div');
   d.className = 'msg ' + cls; d.textContent = text;
@@ -88,7 +108,7 @@ document.getElementById('f').addEventListener('submit', async e => {
   const text = pending.appendChild(document.createElement('div')); text.className = 'live'; text.textContent = '…';
   try {
     const r = await send(message);
-    if (!r.ok) throw new Error(r.status === 401 ? 'Unauthorized: wrong or missing token.' : `Error ${r.status}`);
+    if (!r.ok) throw failed(r);
     // Server-sent events: delta (live text), status (tool step), done (final reply).
     const reader = r.body.getReader(), dec = new TextDecoder();
     let buf = '', live = '', reply = null;
